@@ -119,6 +119,7 @@ async fn handle_generate_text_task(
     );
     if let Some(prompt) = &task.prompt {
         info!("[TEXT_GEN_HANDLER] Prompt: {}", prompt);
+        // TODO: Использовать prompt
     }
 
     let generated_output = markov_model.generate(task.max_length);
@@ -129,10 +130,35 @@ async fn handle_generate_text_task(
         generated_text: generated_output,
         timestamp_ms: current_timestamp_ms(),
     };
-    debug!(
-        "[TEXT_GEN_HANDLER] Stub: Would publish result: {:?}",
-        result_message
-    );
+
+    match serde_json::to_vec(&result_message) {
+        Ok(payload_json) => {
+            info!(
+                "[NATS_PUB_PREP] Publishing GeneratedTextMessage (task_id: {}) to subject: {}",
+                result_message.original_task_id, TEXT_GENERATED_EVENT_SUBJECT
+            );
+            if let Err(e) = nats_client
+                .publish(TEXT_GENERATED_EVENT_SUBJECT, payload_json.into())
+                .await
+            {
+                error!(
+                    "[NATS_PUB_FAIL] Failed to publish GeneratedTextMessage (task_id: {}): {}",
+                    result_message.original_task_id, e
+                );
+            } else {
+                info!(
+                    "[NATS_PUB_SUCCESS] Successfully published GeneratedTextMessage (task_id: {})",
+                    result_message.original_task_id
+                );
+            }
+        }
+        Err(e) => {
+            error!(
+                "[SERIALIZE_FAIL] Failed to serialize GeneratedTextMessage (task_id: {}): {}",
+                result_message.original_task_id, e
+            );
+        }
+    }
 }
 
 #[tokio::main]
