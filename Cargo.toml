@@ -1,5 +1,5 @@
 [workspace]
-members = []
+members = ["services/nats_tester"]
 resolver = "2"
 
 [workspace.package]
