@@ -1,13 +1,13 @@
-use std::time::Duration;
+use std::{env, time::Duration};
 
 use futures::StreamExt;
 
 #[tokio::main]
-async fn main() -> Result<(), async_nats::Error> {
-    let nats_url = "nats://localhost:4222";
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let nats_url = env::var("NATS_URL").unwrap_or_else(|_| "nats://localhost:4222".to_string());
     println!("Connecting to NATS server at {}...", nats_url);
 
-    let client = async_nats::connect(nats_url).await?;
+    let client = async_nats::connect(&nats_url).await.map_err(Box::new)?;
     println!("Connected to NATS!");
 
     let subject = "greet.hello";

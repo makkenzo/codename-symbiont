@@ -33,6 +33,18 @@ services:
         networks:
             - symbiont-net
 
+    nats_tester_app:
+        container_name: cs-nats-tester
+        build:
+            context: .
+            dockerfile: ./services/nats_tester/Dockerfile
+        depends_on:
+            - nats
+        environment:
+            - NATS_URL=nats://cs-nats:4222
+        networks:
+            - symbiont-net
+
 networks:
     symbiont-net:
         driver: bridge
