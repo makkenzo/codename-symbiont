@@ -1,11 +1,99 @@
 use futures::StreamExt;
+use scraper::{Html, Selector};
 use serde_json;
-use std::env;
+use std::{env, time::Duration};
+use uuid::Uuid;
 
-use shared_models::PerceiveUrlTask;
+use shared_models::{PerceiveUrlTask, RawTextMessage, current_timestamp_ms};
 
 const PERCEPTION_URL_TASK_SUBJECT: &str = "tasks.perceive.url";
 // const RAW_TEXT_DISCOVERED_SUBJECT: &str = "data.raw_text.discovered";
+
+async fn scrape_url_content(url: &str) -> Result<String, Box<dyn std::error::Error>> {
+    log_info(&format!("Scraping URL: {}", url));
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_secs(15))
+        .user_agent("CodenameSymbiontBot/0.1 (+https://makkenzo.com)")
+        .build()?;
+
+    let response_text = client.get(url).send().await?.text().await?;
+
+    let document = Html::parse_document(&response_text);
+
+    let mut content_parts = Vec::new();
+
+    let selectors_to_try = vec![
+        "article",
+        "main",
+        "div[role='main']",
+        "div.content",
+        "div.post-content",
+        "div.entry-content",
+        "body",
+    ];
+
+    let mut main_content_html = None;
+
+    for selector_str in selectors_to_try {
+        if let Ok(selector) = Selector::parse(selector_str) {
+            if let Some(element) = document.select(&selector).next() {
+                main_content_html = Some(element.html());
+                log_info(&format!(
+                    "Found content block with selector: {}",
+                    selector_str
+                ));
+                break;
+            }
+        }
+    }
+
+    let html_to_parse = main_content_html.as_ref().unwrap_or(&response_text);
+    let fragment_to_parse = Html::parse_fragment(html_to_parse);
+
+    let text_selectors_str = vec!["h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "span"];
+
+    for selector_str in text_selectors_str {
+        if let Ok(selector) = Selector::parse(selector_str) {
+            for element_ref in fragment_to_parse.select(&selector) {
+                let mut element_text = String::new();
+                for text_node in element_ref.text() {
+                    let trimmed_text_node = text_node.trim();
+                    if !trimmed_text_node.is_empty() {
+                        element_text.push_str(trimmed_text_node);
+                        element_text.push(' ');
+                    }
+                }
+                let cleaned_text_for_element = element_text.trim();
+                if !cleaned_text_for_element.is_empty() {
+                    content_parts.push(cleaned_text_for_element.to_string());
+                }
+            }
+        }
+    }
+
+    let extracted_text = content_parts
+        .join("\n")
+        .lines()
+        .map(|line| line.trim())
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<&str>>()
+        .join("\n");
+
+    if extracted_text.is_empty() {
+        log_warn(&format!(
+            "No meaningful text content extracted from {}",
+            url
+        ));
+    } else {
+        log_info(&format!(
+            "Extracted text (first 200 chars): {:.200}",
+            extracted_text
+        ));
+    }
+
+    Ok(extracted_text)
+}
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -58,18 +146,32 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(task) => {
                 log_info(&format!("Deserialized task for URL: {}", task.url));
 
-                // TODO: Шаг 4 - Реализовать скрапинг task.url
-                // TODO: Шаг 5 - Сформировать RawTextMessage и опубликовать
-                // Временная заглушка для проверки:
-                println!("[perception_service] Received task to scrape: {}", task.url);
+                match scrape_url_content(&task.url).await {
+                    Ok(scraped_text) => {
+                        if scraped_text.is_empty() {
+                            log_warn(&format!("Scraping URL {} yielded no text.", task.url));
+                        } else {
+                            log_info(&format!(
+                                "Successfully scraped URL: {}. Text length: {}",
+                                task.url,
+                                scraped_text.len()
+                            ));
+                        }
 
-                if let Some(reply_subject) = message.reply {
-                    let response_payload =
-                        format!("Task for {} received by perception_service", task.url);
-                    if let Err(e) = client.publish(reply_subject, response_payload.into()).await {
-                        log_warn(&format!("Failed to send reply: {}", e));
-                    } else {
-                        log_info("Sent reply confirmation.");
+                        let raw_msg = RawTextMessage {
+                            id: Uuid::new_v4().to_string(),
+                            source_url: task.url.clone(),
+                            raw_text: scraped_text,
+                            timestamp_ms: current_timestamp_ms(),
+                        };
+
+                        log_info(&format!(
+                            "[Stub] Would publish RawTextMessage with id: {}",
+                            raw_msg.id
+                        ));
+                    }
+                    Err(e) => {
+                        log_error(&format!("Failed to scrape URL {}: {}", task.url, e));
                     }
                 }
             }
