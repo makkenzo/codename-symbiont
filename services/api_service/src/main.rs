@@ -184,7 +184,7 @@ async fn sse_events_handler(
 ) -> Sse<impl futures::Stream<Item = Result<SseEvent, ActixError>>> {
     info!("[API_SSE] New SSE client connected to /api/events");
 
-    let mut rx = app_state.sse_tx.subscribe();
+    let rx = app_state.sse_tx.subscribe();
 
     let event_stream = BroadcastStream::new(rx).filter_map(
         |result: Result<String, BroadcastStreamRecvError>| async move {
