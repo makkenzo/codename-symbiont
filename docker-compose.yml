@@ -46,6 +46,19 @@ services:
         networks:
             - symbiont-net
 
+    preprocessing_service:
+        container_name: cs-preprocessing-service
+        build:
+            context: .
+            dockerfile: ./services/preprocessing_service/Dockerfile
+        depends_on:
+            - nats
+        environment:
+            - NATS_URL=nats://cs-nats:4222
+            - RUST_LOG=info,preprocessing_service=debug
+        networks:
+            - symbiont-net
+
 networks:
     symbiont-net:
         driver: bridge

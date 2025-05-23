@@ -10,7 +10,6 @@ COPY ./libs/shared_models/Cargo.toml ./libs/shared_models/Cargo.toml
 COPY ./libs/shared_models/src ./libs/shared_models/src
 COPY ./services/perception_service/src ./services/perception_service/src
 
-RUN mkdir -p ./services/nats_tester/src && echo "fn main() {println!(\"nats_tester stub\");}" > ./services/nats_tester/src/main.rs
 RUN mkdir -p ./services/preprocessing_service/src && echo "fn main() {println!(\"preprocessing_service stub\");}" > ./services/preprocessing_service/src/main.rs
 
 RUN cargo build --release --package perception_service
