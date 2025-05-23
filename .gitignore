@@ -1,0 +1,15 @@
+/target/
+Cargo.lock
+
+.idea/
+.vscode/
+*.iml
+*.sublime-workspace
+*.sublime-project
+
+.DS_Store
+Thumbs.db
+
+*.log
+
+.env
