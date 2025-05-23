@@ -1,13 +1,118 @@
 use futures::StreamExt;
 use log::{debug, error, info, warn};
+use rand::seq::SliceRandom;
+use rand::thread_rng;
 use shared_models::{GenerateTextTask, GeneratedTextMessage, current_timestamp_ms};
+use std::collections::HashMap;
 use std::env;
 use std::sync::Arc;
 
 const GENERATE_TEXT_TASK_SUBJECT: &str = "tasks.generation.text";
 const TEXT_GENERATED_EVENT_SUBJECT: &str = "events.text.generated";
 
-async fn handle_generate_text_task(task: GenerateTextTask, nats_client: Arc<async_nats::Client>) {
+type MarkovChainModel = HashMap<String, Vec<String>>;
+
+#[derive(Clone, Debug)]
+struct MarkovModel {
+    chain: MarkovChainModel,
+    starters: Vec<String>,
+}
+
+impl MarkovModel {
+    fn new() -> Self {
+        MarkovModel {
+            chain: HashMap::new(),
+            starters: Vec::new(),
+        }
+    }
+
+    fn train(&mut self, text: &str) {
+        if text.is_empty() {
+            warn!("[MARKOV_TRAIN] Input text for training is empty.");
+            return;
+        }
+        info!("[MARKOV_TRAIN] Training Markov model...");
+
+        let words: Vec<String> = text.split_whitespace().map(String::from).collect();
+
+        if words.len() < 2 {
+            warn!(
+                "[MARKOV_TRAIN] Not enough words in text to train (need at least 2). Text: '{}'",
+                text
+            );
+            if !words.is_empty() {
+                self.starters.push(words[0].clone());
+            }
+            return;
+        }
+
+        self.starters.push(words[0].clone());
+
+        for i in 0..(words.len() - 1) {
+            let current_word = words[i].clone();
+            let next_word = words[i + 1].clone();
+
+            self.chain
+                .entry(current_word)
+                .or_insert_with(Vec::new)
+                .push(next_word);
+        }
+
+        self.starters.sort();
+        self.starters.dedup();
+        info!(
+            "[MARKOV_TRAIN] Training complete. Model has {} states. {} starter words.",
+            self.chain.len(),
+            self.starters.len()
+        );
+        if self.chain.len() < 20 && !self.chain.is_empty() {
+            debug!(
+                "[MARKOV_TRAIN] Model sample: {:?}",
+                self.chain.iter().take(5).collect::<Vec<_>>()
+            );
+        }
+        if self.starters.len() < 20 && !self.starters.is_empty() {
+            debug!(
+                "[MARKOV_TRAIN] Starters sample: {:?}",
+                self.starters.iter().take(5).collect::<Vec<_>>()
+            );
+        }
+    }
+
+    fn generate(&self, max_length: u32) -> String {
+        if self.chain.is_empty() || self.starters.is_empty() {
+            warn!(
+                "[MARKOV_GENERATE] Model is not trained or has no starters. Cannot generate text."
+            );
+            return String::from("Model not trained.");
+        }
+
+        let mut rng = thread_rng();
+        let mut current_word = self.starters.choose(&mut rng).unwrap().clone();
+        let mut result_text = vec![current_word.clone()];
+
+        for _ in 0..(max_length - 1) {
+            if let Some(next_words) = self.chain.get(current_word.as_str()) {
+                if let Some(next_word) = next_words.choose(&mut rng) {
+                    result_text.push(next_word.clone());
+                    current_word = next_word.clone();
+                } else {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        result_text.join(" ")
+    }
+}
+
+async fn handle_generate_text_task(
+    task: GenerateTextTask,
+    nats_client: Arc<async_nats::Client>,
+    markov_model: Arc<MarkovModel>,
+) {
     info!(
         "[TEXT_GEN_HANDLER] Received GenerateTextTask (id: {}), max_length: {}",
         task.task_id, task.max_length
@@ -16,10 +121,8 @@ async fn handle_generate_text_task(task: GenerateTextTask, nats_client: Arc<asyn
         info!("[TEXT_GEN_HANDLER] Prompt: {}", prompt);
     }
 
-    let generated_output = format!(
-        "Stub: Generated text for task {} (max_len: {}) - Lorem ipsum...",
-        task.task_id, task.max_length
-    );
+    let generated_output = markov_model.generate(task.max_length);
+    info!("[TEXT_GEN_HANDLER] Generated text: '{}'", generated_output);
 
     let result_message = GeneratedTextMessage {
         original_task_id: task.task_id.clone(),
@@ -36,6 +139,13 @@ async fn handle_generate_text_task(task: GenerateTextTask, nats_client: Arc<asyn
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     info!("Starting...");
+
+    let mut model = MarkovModel::new();
+    let training_text = "я пошел гулять в парк и увидел там собаку собака была очень веселая и я решил с ней поиграть";
+
+    model.train(training_text);
+    let markov_model_instance = Arc::new(model);
+    info!("[MAIN] Markov model initialized and trained.");
 
     let nats_url = env::var("NATS_URL").unwrap_or_else(|_| {
         warn!("[NATS_CONFIG] NATS_URL not set, defaulting to nats://localhost:4222");
@@ -90,9 +200,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 );
 
                 let client_clone = Arc::clone(&nats_client);
+                let model_clone = Arc::clone(&markov_model_instance);
 
                 tokio::spawn(async move {
-                    handle_generate_text_task(task, client_clone).await;
+                    handle_generate_text_task(task, client_clone, model_clone).await;
                 });
             }
             Err(e) => {
