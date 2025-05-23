@@ -1,5 +1,5 @@
 use futures::StreamExt;
-use std::{collections::HashMap, env, sync::Arc};
+use std::{collections::HashMap, env, sync::Arc, time::Duration};
 
 use log::{debug, error, info, warn};
 
@@ -155,6 +155,23 @@ async fn handle_tokenized_text_message(msg: TokenizedTextMessage, graph: Arc<Gra
     }
 }
 
+async fn ensure_schema_internal(graph_client: Arc<Graph>) -> Result<(), Neo4jError> {
+    graph_client
+        .run(Query::new(
+            "CREATE CONSTRAINT IF NOT EXISTS FOR (d:Document) REQUIRE d.original_id IS UNIQUE"
+                .to_string(),
+        ))
+        .await?;
+    graph_client
+        .run(Query::new(
+            "CREATE INDEX token_text_lc_index IF NOT EXISTS FOR (t:Token) ON (t.text_lc)"
+                .to_string(),
+        ))
+        .await?;
+    info!("[NEO4J_SCHEMA] Database schema ensured.");
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -232,31 +249,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         error!("[NEO4J_CONNECT_FAIL] Failed to connect to Neo4j: {:?}", e);
         Box::new(e) as Box<dyn std::error::Error + Send + Sync>
     })?);
-    info!("[NEO4J_CONNECT_SUCCESS] Successfully connected to Neo4j!");
 
-    async fn ensure_schema(graph_client: Arc<Graph>) -> Result<(), Neo4jError> {
-        info!("[NEO4J_SCHEMA] Ensuring database schema (constraints/indexes)...");
-        graph_client
-            .run(Query::new(
-                "CREATE CONSTRAINT IF NOT EXISTS FOR (d:Document) REQUIRE d.original_id IS UNIQUE"
-                    .to_string(),
-            ))
-            .await?;
-        graph_client
-            .run(Query::new(
-                "CREATE INDEX token_text_lc_index IF NOT EXISTS FOR (t:Token) ON (t.text_lc)"
-                    .to_string(),
-            ))
-            .await?;
-        info!("[NEO4J_SCHEMA] Database schema ensured.");
-        Ok(())
-    }
-    if let Err(e) = ensure_schema(Arc::clone(&graph)).await {
-        error!(
-            "[NEO4J_SCHEMA_FAIL] Failed to ensure Neo4j schema: {:?}. Proceeding without schema guarantees, but this might cause issues.",
-            e
-        );
-    }
+    const MAX_SCHEMA_RETRIES: u32 = 5;
+    const SCHEMA_RETRY_DELAY_MS: u64 = 3000;
+
+    let graph_arc_for_schema = Arc::clone(&graph);
+    tokio::spawn(async move {
+        for attempt in 1..=MAX_SCHEMA_RETRIES {
+            info!(
+                "[NEO4J_SCHEMA_ATTEMPT] Attempt {} to ensure Neo4j schema...",
+                attempt
+            );
+
+            match ensure_schema_internal(Arc::clone(&graph_arc_for_schema)).await {
+                Ok(_) => {
+                    info!("[NEO4J_SCHEMA_SUCCESS] Neo4j schema ensured successfully.");
+                    return;
+                }
+                Err(e) => {
+                    error!(
+                        "[NEO4J_SCHEMA_FAIL] Failed to ensure Neo4j schema (attempt {}/{}): {:?}. Retrying in {}ms...",
+                        attempt, MAX_SCHEMA_RETRIES, e, SCHEMA_RETRY_DELAY_MS
+                    );
+                    if attempt == MAX_SCHEMA_RETRIES {
+                        error!(
+                            "[NEO4J_SCHEMA_FATAL] Max retries reached for ensuring schema. Service might not work correctly."
+                        );
+                        return;
+                    }
+                    tokio::time::sleep(Duration::from_millis(SCHEMA_RETRY_DELAY_MS)).await;
+                }
+            }
+        }
+    });
 
     info!("[NATS_LOOP] Waiting for tokenized text messages...");
 
