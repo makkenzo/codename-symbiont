@@ -1,5 +1,5 @@
 use futures::StreamExt;
-use log::{debug, error, info, trace, warn};
+use log::{error, info, warn};
 use serde_json;
 use shared_models::{RawTextMessage, TokenizedTextMessage, current_timestamp_ms};
 use std::collections::HashMap;

@@ -5,6 +5,7 @@ members = [
     "services/perception_service",
     "services/preprocessing_service",
     "services/text_generator_service",
+    "services/api_service",
 ]
 resolver = "2"
 
