@@ -1,5 +1,5 @@
 [workspace]
-members = ["libs/shared_models", "services/perception_service"]
+members = ["libs/shared_models", "services/perception_service", "services/preprocessing_service"]
 resolver = "2"
 
 [workspace.package]
