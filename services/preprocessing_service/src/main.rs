@@ -6,7 +6,7 @@ use std::env;
 use std::sync::Arc;
 
 use tokenizers::decoders::sequence::Sequence;
-use tokenizers::models::bpe::{BPE, BpeBuilder, Vocab};
+use tokenizers::models::bpe::{BPE, BpeBuilder, Vocab as TokenizersVocab};
 use tokenizers::normalizers::BertNormalizer;
 use tokenizers::pre_tokenizers::whitespace::Whitespace;
 use tokenizers::processors::bert::BertProcessing;
@@ -58,25 +58,16 @@ fn process_text_message(raw_msg: &RawTextMessage) -> Result<TokenizedTextMessage
         sentences.push(cleaned_text.clone());
     }
 
-    let mut vocab: Vocab = HashMap::new();
+    let mut vocab: TokenizersVocab = HashMap::new();
     vocab.insert("<unk>".to_string(), 0);
 
     let merges: Vec<(String, String)> = Vec::new();
 
-    let bpe_model = match BpeBuilder::new()
+    let bpe_model = BpeBuilder::new()
         .vocab_and_merges(vocab, merges)
         .unk_token("<unk>".to_string())
         .build()
-    {
-        Ok(model) => model,
-        Err(e) => {
-            log_error(&format!(
-                "[text_processor] Failed to build BPE model: {:?}",
-                e
-            ));
-            return Err(format!("Failed to build BPE model: {:?}", e));
-        }
-    };
+        .map_err(|e| format!("Failed to build BPE model: {:?}", e))?;
 
     let tokenizer_result: Result<
         TokenizerImpl<BPE, BertNormalizer, Whitespace, BertProcessing, Sequence>,
@@ -140,6 +131,52 @@ fn process_text_message(raw_msg: &RawTextMessage) -> Result<TokenizedTextMessage
     })
 }
 
+async fn handle_raw_text_message(
+    raw_text_msg: RawTextMessage,
+    nats_client: Arc<async_nats::Client>,
+) {
+    match process_text_message(&raw_text_msg) {
+        Ok(tokenized_msg) => {
+            log_info(&format!(
+                "Text processed for original_id: {}. Publishing TokenizedTextMessage...",
+                tokenized_msg.original_id
+            ));
+
+            match serde_json::to_vec(&tokenized_msg) {
+                Ok(payload_json) => {
+                    if let Err(e) = nats_client
+                        .publish(PROCESSED_TEXT_TOKENIZED_SUBJECT, payload_json.into())
+                        .await
+                    {
+                        log_error(&format!(
+                            "Failed to publish TokenizedTextMessage (original_id: {}): {}",
+                            tokenized_msg.original_id, e
+                        ));
+                    } else {
+                        log_info(&format!(
+                            "Successfully published TokenizedTextMessage (original_id: {}) with {} tokens.",
+                            tokenized_msg.original_id,
+                            tokenized_msg.tokens.len()
+                        ));
+                    }
+                }
+                Err(e) => {
+                    log_error(&format!(
+                        "Failed to serialize TokenizedTextMessage (original_id: {}): {}",
+                        tokenized_msg.original_id, e
+                    ));
+                }
+            }
+        }
+        Err(e) => {
+            log_error(&format!(
+                "Failed to process text for id {}: {}",
+                raw_text_msg.id, e
+            ));
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("[preprocessing_service] Starting...");
@@ -194,23 +231,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     raw_text_msg.id, raw_text_msg.source_url
                 ));
 
-                match process_text_message(&raw_text_msg) {
-                    Ok(tokenized_msg) => {
-                        // TODO: Опубликовать tokenized_msg в NATS
-                        log_info(&format!(
-                            "[Stub] Would publish TokenizedTextMessage (original_id: {}) with {} tokens and {} sentences.",
-                            tokenized_msg.original_id,
-                            tokenized_msg.tokens.len(),
-                            tokenized_msg.sentences.len()
-                        ));
-                    }
-                    Err(e) => {
-                        log_error(&format!(
-                            "Failed to process text for id {}: {}",
-                            raw_text_msg.id, e
-                        ));
-                    }
-                }
+                let nats_client_clone = Arc::clone(&client);
+
+                tokio::spawn(async move {
+                    handle_raw_text_message(raw_text_msg, nats_client_clone).await;
+                });
             }
             Err(e) => {
                 log_warn(&format!(
