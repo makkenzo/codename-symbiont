@@ -33,15 +33,16 @@ services:
         networks:
             - symbiont-net
 
-    nats_tester_app:
-        container_name: cs-nats-tester
+    perception_service:
+        container_name: cs-perception-service
         build:
             context: .
-            dockerfile: ./services/nats_tester/Dockerfile
+            dockerfile: ./services/perception_service/Dockerfile
         depends_on:
             - nats
         environment:
             - NATS_URL=nats://cs-nats:4222
+            - RUST_LOG=info,perception_service=debug
         networks:
             - symbiont-net
 

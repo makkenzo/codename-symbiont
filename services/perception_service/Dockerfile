@@ -1,0 +1,22 @@
+FROM rust:1.86.0 AS builder
+
+WORKDIR /usr/src/app
+
+COPY Cargo.toml ./Cargo.toml
+
+COPY ./services/perception_service/Cargo.toml ./services/perception_service/Cargo.toml
+COPY ./libs/shared_models/Cargo.toml ./libs/shared_models/Cargo.toml
+COPY ./libs/shared_models/src ./libs/shared_models/src
+COPY ./services/perception_service/src ./services/perception_service/src
+
+RUN cargo build --release --package perception_service
+
+FROM debian:bookworm-20250520-slim
+
+RUN apt-get update && apt-get install -y ca-certificates && rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /usr/src/app/target/release/perception_service /usr/local/bin/perception_service
+
+WORKDIR /app
+
+ENTRYPOINT ["/usr/local/bin/perception_service"]
