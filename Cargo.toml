@@ -4,6 +4,7 @@ members = [
     "services/knowledge_graph_service",
     "services/perception_service",
     "services/preprocessing_service",
+    "services/text_generator_service",
 ]
 resolver = "2"
 
