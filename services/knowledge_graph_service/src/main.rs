@@ -2,23 +2,100 @@ use futures::StreamExt;
 use std::{env, sync::Arc};
 
 use log::{debug, error, info, warn};
-use neo4rs::{ConfigBuilder, Error as Neo4jError, Graph};
+use neo4rs::{ConfigBuilder, Error as Neo4jError, Graph, query};
 use shared_models::TokenizedTextMessage;
 
 const PROCESSED_TEXT_TOKENIZED_SUBJECT: &str = "data.processed_text.tokenized";
 
-async fn handle_tokenized_text_message(msg: TokenizedTextMessage) {
+async fn save_to_neo4j(msg: &TokenizedTextMessage, graph: Arc<Graph>) -> Result<(), Neo4jError> {
+    info!(
+        "[NEO4J_SAVE] Attempting to save data for original_id: {}",
+        msg.original_id
+    );
+
+    let mut tx = graph.start_txn().await?;
+
+    let doc_query = query(
+        "MERGE (d:Document {original_id: $original_id}) \
+         ON CREATE SET d.source_url = $source_url, d.processed_at_ms = $processed_at \
+         ON MATCH SET d.source_url = $source_url, d.processed_at_ms = $processed_at \
+         RETURN id(d) AS doc_node_id",
+    )
+    .param("original_id", msg.original_id.clone())
+    .param("source_url", msg.source_url.clone())
+    .param("processed_at", msg.timestamp_ms as i64);
+
+    tx.run(doc_query).await?;
+    info!(
+        "[NEO4J_SAVE] Document node processed for original_id: {}",
+        msg.original_id
+    );
+
+    for (sentence_order, sentence_text) in msg.sentences.iter().enumerate() {
+        if sentence_text.trim().is_empty() {
+            continue;
+        }
+
+        let sentence_query_str = format!(
+            "MATCH (d:Document {{original_id: $original_id}}) \
+             MERGE (d)-[r:HAS_SENTENCE {{order: $order}}]->(s:Sentence) \
+             ON CREATE SET s.text = $text, s.order = $order \
+             ON MATCH SET s.text = $text \
+             RETURN id(s) AS sentence_node_id"
+        );
+
+        let sentence_query = query(&sentence_query_str)
+            .param("original_id", msg.original_id.clone())
+            .param("text", sentence_text.clone())
+            .param("order", sentence_order as i64);
+
+        tx.run(sentence_query).await?;
+    }
+
+    for token_text in msg.tokens.iter() {
+        if token_text.trim().is_empty() {
+            continue;
+        }
+        let token_query_str = format!(
+            "MATCH (d:Document {{original_id: $original_id}}) \
+             MERGE (t:Token {{text: $token_text}}) \
+             MERGE (d)-[:CONTAINS_TOKEN]->(t)"
+        );
+        let token_query = query(&token_query_str)
+            .param("original_id", msg.original_id.clone())
+            .param("token_text", token_text.to_lowercase());
+
+        tx.run(token_query).await?;
+    }
+
+    info!(
+        "[NEO4J_SAVE] Token nodes processed for document_id: {}",
+        msg.original_id
+    );
+
+    tx.commit().await?;
+    info!(
+        "[NEO4J_SAVE] Successfully saved data for original_id: {}",
+        msg.original_id
+    );
+
+    Ok(())
+}
+
+async fn handle_tokenized_text_message(msg: TokenizedTextMessage, graph: Arc<Graph>) {
     info!(
         "[KG_HANDLER] Received TokenizedTextMessage (original_id: {}), {} tokens, {} sentences.",
         msg.original_id,
         msg.tokens.len(),
         msg.sentences.len()
     );
-    // TODO: Сформировать и выполнить Cypher-запросы для сохранения в Neo4j
-    debug!(
-        "[KG_HANDLER] Stub: Data for original_id {} would be processed for Neo4j.",
-        msg.original_id
-    );
+
+    if let Err(e) = save_to_neo4j(&msg, graph).await {
+        error!(
+            "[KG_HANDLER_ERROR] Failed to save data to Neo4j for original_id {}: {}",
+            msg.original_id, e
+        );
+    }
 }
 
 #[tokio::main]
@@ -65,6 +142,60 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             return Err(Box::new(err) as Box<dyn std::error::Error>);
         }
     };
+
+    let neo4j_uri = env::var("NEO4J_URI").unwrap_or_else(|_| {
+        warn!("[NEO4J_CONFIG] NEO4J_URI not set, defaulting to bolt://localhost:7687");
+        "bolt://localhost:7687".to_string()
+    });
+    let neo4j_user = env::var("NEO4J_USER").unwrap_or_else(|_| {
+        warn!("[NEO4J_CONFIG] NEO4J_USER not set, defaulting to 'neo4j'");
+        "neo4j".to_string()
+    });
+
+    let neo4j_pass = env::var("NEO4J_PASSWORD").unwrap_or_else(|_| {
+        warn!("[NEO4J_CONFIG] NEO4J_PASSWORD not set. Ensure Neo4j auth is 'none' or provide password.");
+        "s3cr3tPassword".to_string()
+    });
+
+    info!(
+        "[NEO4J_CONNECT] Attempting to connect to Neo4j at URI: {}, User: {}",
+        neo4j_uri, neo4j_user
+    );
+
+    let config = ConfigBuilder::default()
+        .uri(&neo4j_uri)
+        .user(&neo4j_user)
+        .password(&neo4j_pass)
+        .db("neo4j")
+        .fetch_size(500)
+        .max_connections(10)
+        .build()?;
+
+    let graph = Arc::new(Graph::connect(config).await.map_err(|e| {
+        error!("[NEO4J_CONNECT_FAIL] Failed to connect to Neo4j: {:?}", e);
+        e
+    })?);
+    info!("[NEO4J_CONNECT_SUCCESS] Successfully connected to Neo4j!");
+
+    async fn ensure_schema(graph_client: Arc<Graph>) -> Result<(), Neo4jError> {
+        info!("[NEO4J_SCHEMA] Ensuring database schema (constraints/indexes)...");
+        graph_client
+            .run(query(
+                "CREATE CONSTRAINT IF NOT EXISTS FOR (d:Document) REQUIRE d.original_id IS UNIQUE",
+            ))
+            .await?;
+        graph_client
+            .run(query(
+                "CREATE INDEX token_text_index IF NOT EXISTS FOR (t:Token) ON (t.text)",
+            ))
+            .await?;
+        info!("[NEO4J_SCHEMA] Database schema ensured.");
+        Ok(())
+    }
+    if let Err(e) = ensure_schema(Arc::clone(&graph)).await {
+        error!("[NEO4J_SCHEMA_FAIL] Failed to ensure Neo4j schema: {:?}", e);
+    }
+
     info!("[NATS_LOOP] Waiting for tokenized text messages...");
 
     while let Some(message) = subscriber.next().await {
@@ -81,8 +212,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     tokenized_msg.original_id
                 );
 
+                let graph_clone = Arc::clone(&graph);
+
                 tokio::spawn(async move {
-                    handle_tokenized_text_message(tokenized_msg).await;
+                    handle_tokenized_text_message(tokenized_msg, graph_clone).await;
                 });
             }
             Err(e) => {

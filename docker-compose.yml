@@ -9,7 +9,7 @@ services:
             - ./data/neo4j/data:/data
             - ./data/neo4j/logs:/logs
         environment:
-            - NEO4J_AUTH=${NEO4J_USERNAME}/${NEO4J_PASSWORD}
+            - NEO4J_AUTH=${NEO4J_USER}/${NEO4J_PASSWORD}
         networks:
             - symbiont-net
 
