@@ -1,4 +1,5 @@
-use actix_web::{App, HttpResponse, HttpServer, Responder, web};
+use actix_web::{App, Error as ActixError, HttpResponse, HttpServer, Responder, web};
+use actix_web_lab::sse::{self, Data as SseData, Event as SseEvent, Sse};
 use async_nats::Client as NatsClient;
 use futures::StreamExt;
 use log::{debug, error, info, warn};
@@ -6,8 +7,9 @@ use serde::{Deserialize, Serialize};
 use shared_models::{GenerateTextTask, GeneratedTextMessage, PerceiveUrlTask};
 use std::env;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::broadcast;
-use uuid::Uuid;
+use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
 
 const PERCEPTION_URL_TASK_SUBJECT: &str = "tasks.perceive.url";
 const GENERATE_TEXT_TASK_SUBJECT: &str = "tasks.generation.text";
@@ -177,15 +179,29 @@ async fn generate_text_handler(
     }
 }
 
-async fn sse_events_handler(app_state: web::Data<AppState>) -> impl Responder {
-    info!("[API] SSE client connected to /api/events");
-    // TODO: Реализовать подписку на broadcast канал и стриминг SSE
+async fn sse_events_handler(
+    app_state: web::Data<AppState>,
+) -> Sse<impl futures::Stream<Item = Result<SseEvent, ActixError>>> {
+    info!("[API_SSE] New SSE client connected to /api/events");
+
     let mut rx = app_state.sse_tx.subscribe();
-    HttpResponse::Ok()
-        .content_type("text/event-stream")
-        .append_header(("Cache-Control", "no-cache"))
-        .append_header(("Connection", "keep-alive"))
-        .body(": sse connected (stub, full implementation pending)\n\n")
+
+    let event_stream = BroadcastStream::new(rx).filter_map(
+        |result: Result<String, BroadcastStreamRecvError>| async move {
+            match result {
+                Ok(json_payload) => Some(Ok(SseEvent::Data(SseData::new(json_payload)))),
+                Err(BroadcastStreamRecvError::Lagged(num_skipped)) => {
+                    warn!(
+                        "[SSE_STREAM] SSE receiver lagged, skipped {} messages.",
+                        num_skipped
+                    );
+                    None
+                }
+            }
+        },
+    );
+
+    Sse::from_stream(event_stream).with_keep_alive(Duration::from_secs(15))
 }
 
 async fn nats_to_sse_listener(nats_client: Arc<NatsClient>, sse_tx: broadcast::Sender<String>) {

@@ -7,7 +7,7 @@ license.workspace = true
 
 [dependencies]
 actix-web = "4"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "sync"] }
 async-nats = "0.33"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
@@ -17,3 +17,5 @@ env_logger = "0.11.0"
 shared_models = { path = "../../libs/shared_models" }
 uuid = { version = "1", features = ["v4", "serde"] }
 actix-web-lab = "0.24.1"
+async-stream = "0.3"
+tokio-stream = { version = "0.1", features = ["sync"] }
