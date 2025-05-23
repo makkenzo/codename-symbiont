@@ -76,6 +76,19 @@ services:
         networks:
             - symbiont-net
 
+    text_generator_service:
+        container_name: cs-text-generator-service
+        build:
+            context: .
+            dockerfile: ./services/text_generator_service/Dockerfile
+        depends_on:
+            - nats
+        environment:
+            - NATS_URL=nats://cs-nats:4222
+            - RUST_LOG=info,text_generator_service=debug
+        networks:
+            - symbiont-net
+
 networks:
     symbiont-net:
         driver: bridge
