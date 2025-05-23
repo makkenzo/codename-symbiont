@@ -74,3 +74,13 @@ To run the MVP 1 pipeline:
 ## Roadmap
 
 [Trello](https://trello.com/b/0rCkQEeu/codename-symbiont)
+
+## License
+
+This project is licensed under either of
+
+-   Apache License, Version 2.0, ([LICENSE-APACHE](https://github.com/makkenzo/codename-symbiont/blob/master/LICENSE-APACHE.md))
+
+-   MIT license ([LICENSE-MIT](https://github.com/makkenzo/codename-symbiont/blob/master/LICENSE-MIT.md))
+
+at your option.
