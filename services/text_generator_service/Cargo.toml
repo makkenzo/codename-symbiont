@@ -14,3 +14,4 @@ rand = "0.8"
 log = "0.4"
 env_logger = "0.11.8"
 shared_models = { path = "../../libs/shared_models" }
+futures = "0.3"
