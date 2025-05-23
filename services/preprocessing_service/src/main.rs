@@ -1,4 +1,5 @@
 use futures::StreamExt;
+use log::{debug, error, info, trace, warn};
 use serde_json;
 use shared_models::{RawTextMessage, TokenizedTextMessage, current_timestamp_ms};
 use std::collections::HashMap;
@@ -16,10 +17,10 @@ const RAW_TEXT_DISCOVERED_SUBJECT: &str = "data.raw_text.discovered";
 const PROCESSED_TEXT_TOKENIZED_SUBJECT: &str = "data.processed_text.tokenized";
 
 fn process_text_message(raw_msg: &RawTextMessage) -> Result<TokenizedTextMessage, String> {
-    log_info(&format!(
+    info!(
         "[text_processor] Processing text for id: {}, url: {}",
         raw_msg.id, raw_msg.source_url
-    ));
+    );
 
     let cleaned_text = raw_msg
         .raw_text
@@ -28,10 +29,10 @@ fn process_text_message(raw_msg: &RawTextMessage) -> Result<TokenizedTextMessage
         .join(" ");
 
     if cleaned_text.is_empty() {
-        log_warn(&format!(
+        warn!(
             "[text_processor] Cleaned text is empty for id: {}",
             raw_msg.id
-        ));
+        );
         return Err(format!("Cleaned text is empty for id: {}", raw_msg.id));
     }
 
@@ -80,10 +81,7 @@ fn process_text_message(raw_msg: &RawTextMessage) -> Result<TokenizedTextMessage
     let tokenizer = match tokenizer_result {
         Ok(tk) => tk,
         Err(e) => {
-            log_error(&format!(
-                "[text_processor] Failed to build tokenizer: {:?}",
-                e
-            ));
+            error!("[text_processor] Failed to build tokenizer: {:?}", e);
             return Err(format!("Failed to build tokenizer: {:?}", e));
         }
     };
@@ -93,10 +91,10 @@ fn process_text_message(raw_msg: &RawTextMessage) -> Result<TokenizedTextMessage
     let tokens: Vec<String> = match encoding_result {
         Ok(encoding) => encoding.get_tokens().to_vec(),
         Err(e) => {
-            log_error(&format!(
+            error!(
                 "[text_processor] Tokenization failed for id {}: {:?}",
-                raw_msg.id, e
-            ));
+                raw_msg.id, e,
+            );
             return Err(format!(
                 "Tokenization failed for id {}: {:?}",
                 raw_msg.id, e
@@ -105,22 +103,22 @@ fn process_text_message(raw_msg: &RawTextMessage) -> Result<TokenizedTextMessage
     };
 
     if tokens.is_empty() && !cleaned_text.is_empty() {
-        log_warn(&format!(
+        warn!(
             "[text_processor] Tokenization yielded no tokens for id: {}, but cleaned text was not empty.",
-            raw_msg.id
-        ));
+            raw_msg.id,
+        );
         return Err(format!(
             "Tokenization yielded no tokens for id: {}",
             raw_msg.id
         ));
     }
 
-    log_info(&format!(
+    info!(
         "[text_processor] Extracted {} sentences and {} tokens for id: {}",
         sentences.len(),
         tokens.len(),
         raw_msg.id
-    ));
+    );
 
     Ok(TokenizedTextMessage {
         original_id: raw_msg.id.clone(),
@@ -137,10 +135,10 @@ async fn handle_raw_text_message(
 ) {
     match process_text_message(&raw_text_msg) {
         Ok(tokenized_msg) => {
-            log_info(&format!(
+            info!(
                 "Text processed for original_id: {}. Publishing TokenizedTextMessage...",
-                tokenized_msg.original_id
-            ));
+                tokenized_msg.original_id,
+            );
 
             match serde_json::to_vec(&tokenized_msg) {
                 Ok(payload_json) => {
@@ -148,88 +146,80 @@ async fn handle_raw_text_message(
                         .publish(PROCESSED_TEXT_TOKENIZED_SUBJECT, payload_json.into())
                         .await
                     {
-                        log_error(&format!(
+                        error!(
                             "Failed to publish TokenizedTextMessage (original_id: {}): {}",
-                            tokenized_msg.original_id, e
-                        ));
+                            tokenized_msg.original_id, e,
+                        )
                     } else {
-                        log_info(&format!(
+                        info!(
                             "Successfully published TokenizedTextMessage (original_id: {}) with {} tokens.",
                             tokenized_msg.original_id,
-                            tokenized_msg.tokens.len()
-                        ));
+                            tokenized_msg.tokens.len(),
+                        )
                     }
                 }
                 Err(e) => {
-                    log_error(&format!(
+                    error!(
                         "Failed to serialize TokenizedTextMessage (original_id: {}): {}",
-                        tokenized_msg.original_id, e
-                    ));
+                        tokenized_msg.original_id, e,
+                    )
                 }
             }
         }
         Err(e) => {
-            log_error(&format!(
-                "Failed to process text for id {}: {}",
-                raw_text_msg.id, e
-            ));
+            error!("Failed to process text for id {}: {}", raw_text_msg.id, e,)
         }
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
     println!("[preprocessing_service] Starting...");
 
     let nats_url = env::var("NATS_URL").unwrap_or_else(|_| {
-        log_warn("NATS_URL not set, defaulting to nats://localhost:4222");
+        warn!("NATS_URL not set, defaulting to nats://localhost:4222");
         "nats://localhost:4222".to_string()
     });
 
-    log_info(&format!(
-        "Attempting to connect to NATS server at {}...",
-        nats_url
-    ));
+    info!("Attempting to connect to NATS server at {}...", nats_url,);
 
     let client = match async_nats::connect(&nats_url).await {
         Ok(client) => {
-            log_info("Successfully connected to NATS!");
+            info!("Successfully connected to NATS!");
             Arc::new(client)
         }
         Err(err) => {
-            log_error(&format!("Failed to connect to NATS: {}", err));
+            error!("Failed to connect to NATS: {}", err);
             return Err(Box::new(err) as Box<dyn std::error::Error>);
         }
     };
 
     let mut subscriber = match client.subscribe(RAW_TEXT_DISCOVERED_SUBJECT).await {
         Ok(sub) => {
-            log_info(&format!(
-                "Subscribed to subject: {}",
-                RAW_TEXT_DISCOVERED_SUBJECT
-            ));
+            info!("Subscribed to subject: {}", RAW_TEXT_DISCOVERED_SUBJECT);
             sub
         }
         Err(err) => {
-            log_error(&format!(
+            error!(
                 "Failed to subscribe to {}: {}",
                 RAW_TEXT_DISCOVERED_SUBJECT, err
-            ));
+            );
             return Err(Box::new(err) as Box<dyn std::error::Error>);
         }
     };
 
-    log_info("[preprocessing_service] Waiting for raw text messages...");
+    info!("Waiting for raw text messages...");
 
     while let Some(message) = subscriber.next().await {
-        log_info(&format!("Received message on subject: {}", message.subject));
+        info!("Received message on subject: {}", message.subject);
 
         match serde_json::from_slice::<RawTextMessage>(&message.payload) {
             Ok(raw_text_msg) => {
-                log_info(&format!(
+                info!(
                     "Deserialized RawTextMessage (id: {}, url: {})",
-                    raw_text_msg.id, raw_text_msg.source_url
-                ));
+                    raw_text_msg.id, raw_text_msg.source_url,
+                );
 
                 let nats_client_clone = Arc::clone(&client);
 
@@ -238,25 +228,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 });
             }
             Err(e) => {
-                log_warn(&format!(
+                warn!(
                     "Failed to deserialize RawTextMessage: {}. Payload: {:?}",
                     e,
-                    String::from_utf8_lossy(&message.payload)
-                ));
+                    String::from_utf8_lossy(&message.payload),
+                );
             }
         }
     }
 
-    log_info("[preprocessing_service] Subscription ended or NATS connection lost.");
+    info!("Subscription ended or NATS connection lost.");
     Ok(())
-}
-
-fn log_info(message: &str) {
-    println!("[INFO] {}", message);
-}
-fn log_warn(message: &str) {
-    println!("[WARN] {}", message);
-}
-fn log_error(message: &str) {
-    eprintln!("[ERROR] {}", message);
 }
