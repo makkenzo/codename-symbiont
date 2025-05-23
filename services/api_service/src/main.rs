@@ -3,12 +3,13 @@ use async_nats::Client as NatsClient;
 use futures::StreamExt;
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
-use shared_models::{GenerateTextTask, GeneratedTextMessage};
+use shared_models::{GenerateTextTask, GeneratedTextMessage, PerceiveUrlTask};
 use std::env;
 use std::sync::Arc;
 use tokio::sync::broadcast;
 use uuid::Uuid;
 
+const PERCEPTION_URL_TASK_SUBJECT: &str = "tasks.perceive.url";
 const TEXT_GENERATED_EVENT_SUBJECT: &str = "events.text.generated";
 
 #[derive(Serialize, Clone)]
@@ -27,17 +28,75 @@ struct AppState {
     sse_tx: broadcast::Sender<String>,
 }
 
-async fn submit_url_handler(payload: web::Json<SubmitUrlApiPayload>) -> impl Responder {
-    let task_id = Uuid::new_v4().to_string();
+async fn submit_url_handler(
+    payload: web::Json<SubmitUrlApiPayload>,
+    app_state: web::Data<AppState>,
+) -> impl Responder {
+    let url_to_scrape = payload.url.trim();
+
+    if url_to_scrape.is_empty() {
+        warn!("[API_SUBMIT_URL] Received empty URL");
+        return HttpResponse::BadRequest().json(ApiResponse {
+            message: "URL cannot be empty".to_string(),
+            task_id: None,
+        });
+    }
+
+    // TODO: Валидация URL
+
     info!(
-        "[API] /api/submit-url called for URL: {}, generated task_id: {}",
-        payload.url, task_id
+        "[API_SUBMIT_URL] Received request to scrape URL: {}",
+        url_to_scrape
     );
-    // TODO: Сформировать PerceiveUrlTask и опубликовать в NATS
-    HttpResponse::Ok().json(ApiResponse {
-        message: format!("Task to scrape URL {} submitted (stub)", payload.url),
-        task_id: Some(task_id),
-    })
+
+    let perceiver_task = PerceiveUrlTask {
+        url: url_to_scrape.to_string(),
+    };
+
+    match serde_json::to_vec(&perceiver_task) {
+        Ok(task_payload_json) => {
+            info!(
+                "[API_SUBMIT_URL] Publishing PerceiveUrlTask to NATS subject: {}",
+                PERCEPTION_URL_TASK_SUBJECT
+            );
+            if let Err(e) = app_state
+                .nats_client
+                .publish(PERCEPTION_URL_TASK_SUBJECT, task_payload_json.into())
+                .await
+            {
+                error!(
+                    "[API_SUBMIT_URL] Failed to publish PerceiveUrlTask to NATS: {}",
+                    e
+                );
+                HttpResponse::InternalServerError().json(ApiResponse {
+                    message: "Failed to publish task to processing queue".to_string(),
+                    task_id: None,
+                })
+            } else {
+                info!(
+                    "[API_SUBMIT_URL] Successfully published PerceiveUrlTask for URL: {}",
+                    url_to_scrape
+                );
+                HttpResponse::Ok().json(ApiResponse {
+                    message: format!(
+                        "Task to scrape URL '{}' submitted successfully.",
+                        url_to_scrape
+                    ),
+                    task_id: None,
+                })
+            }
+        }
+        Err(e) => {
+            error!(
+                "[API_SUBMIT_URL] Failed to serialize PerceiveUrlTask: {}",
+                e
+            );
+            HttpResponse::InternalServerError().json(ApiResponse {
+                message: "Internal error: Failed to prepare task".to_string(),
+                task_id: None,
+            })
+        }
+    }
 }
 
 async fn generate_text_handler(task_payload: web::Json<GenerateTextTask>) -> impl Responder {
@@ -53,14 +112,15 @@ async fn generate_text_handler(task_payload: web::Json<GenerateTextTask>) -> imp
     })
 }
 
-async fn sse_events_handler() -> impl Responder {
+async fn sse_events_handler(app_state: web::Data<AppState>) -> impl Responder {
     info!("[API] SSE client connected to /api/events");
     // TODO: Реализовать подписку на broadcast канал и стриминг SSE
+    let mut rx = app_state.sse_tx.subscribe();
     HttpResponse::Ok()
         .content_type("text/event-stream")
         .append_header(("Cache-Control", "no-cache"))
         .append_header(("Connection", "keep-alive"))
-        .body(": sse connected (stub)\n\n")
+        .body(": sse connected (stub, full implementation pending)\n\n")
 }
 
 async fn nats_to_sse_listener(nats_client: Arc<NatsClient>, sse_tx: broadcast::Sender<String>) {
