@@ -10,6 +10,7 @@ use tokio::sync::broadcast;
 use uuid::Uuid;
 
 const PERCEPTION_URL_TASK_SUBJECT: &str = "tasks.perceive.url";
+const GENERATE_TEXT_TASK_SUBJECT: &str = "tasks.generation.text";
 const TEXT_GENERATED_EVENT_SUBJECT: &str = "events.text.generated";
 
 #[derive(Serialize, Clone)]
@@ -99,17 +100,81 @@ async fn submit_url_handler(
     }
 }
 
-async fn generate_text_handler(task_payload: web::Json<GenerateTextTask>) -> impl Responder {
-    let task = task_payload.into_inner();
+async fn generate_text_handler(
+    task_payload_from_http: web::Json<GenerateTextTask>,
+    app_state: web::Data<AppState>,
+) -> impl Responder {
+    let task = task_payload_from_http.into_inner();
+
     info!(
         "[API] /api/generate-text called with task_id: {}",
         task.task_id
     );
-    // TODO: Опубликовать GenerateTextTask в NATS
-    HttpResponse::Ok().json(ApiResponse {
-        message: format!("Text generation task {} submitted (stub)", task.task_id),
-        task_id: Some(task.task_id),
-    })
+    debug!("[API_GENERATE_TEXT] Task details: {:?}", task);
+
+    if task.task_id.trim().is_empty() {
+        warn!("[API_GENERATE_TEXT] Received task with empty task_id");
+        return HttpResponse::BadRequest().json(ApiResponse {
+            message: "task_id cannot be empty".to_string(),
+            task_id: None,
+        });
+    }
+
+    if task.max_length == 0 || task.max_length > 1000 {
+        warn!(
+            "[API_GENERATE_TEXT] Received task with invalid max_length: {}",
+            task.max_length
+        );
+        return HttpResponse::BadRequest().json(ApiResponse {
+            message: "max_length must be between 1 and 1000".to_string(),
+            task_id: Some(task.task_id),
+        });
+    }
+
+    match serde_json::to_vec(&task) {
+        Ok(nats_payload_json) => {
+            info!(
+                "[API_GENERATE_TEXT] Publishing GenerateTextTask (id: {}) to NATS subject: {}",
+                task.task_id, GENERATE_TEXT_TASK_SUBJECT
+            );
+            if let Err(e) = app_state
+                .nats_client
+                .publish(GENERATE_TEXT_TASK_SUBJECT, nats_payload_json.into())
+                .await
+            {
+                error!(
+                    "[API_GENERATE_TEXT] Failed to publish GenerateTextTask (id: {}) to NATS: {}",
+                    task.task_id, e
+                );
+                HttpResponse::InternalServerError().json(ApiResponse {
+                    message: "Failed to publish generation task to queue".to_string(),
+                    task_id: Some(task.task_id.clone()),
+                })
+            } else {
+                info!(
+                    "[API_GENERATE_TEXT] Successfully published GenerateTextTask (id: {})",
+                    task.task_id
+                );
+                HttpResponse::Ok().json(ApiResponse {
+                    message: format!(
+                        "Text generation task (id: {}) submitted successfully.",
+                        task.task_id
+                    ),
+                    task_id: Some(task.task_id.clone()),
+                })
+            }
+        }
+        Err(e) => {
+            error!(
+                "[API_GENERATE_TEXT] Failed to serialize GenerateTextTask (id: {}): {}",
+                task.task_id, e
+            );
+            HttpResponse::InternalServerError().json(ApiResponse {
+                message: "Internal error: Failed to prepare generation task".to_string(),
+                task_id: Some(task.task_id.clone()),
+            })
+        }
+    }
 }
 
 async fn sse_events_handler(app_state: web::Data<AppState>) -> impl Responder {
