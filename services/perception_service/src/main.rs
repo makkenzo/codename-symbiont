@@ -1,13 +1,79 @@
+use async_nats::Client as NatsClient;
 use futures::StreamExt;
 use scraper::{Html, Selector};
 use serde_json;
+use std::sync::Arc;
 use std::{env, time::Duration};
 use uuid::Uuid;
 
 use shared_models::{PerceiveUrlTask, RawTextMessage, current_timestamp_ms};
 
 const PERCEPTION_URL_TASK_SUBJECT: &str = "tasks.perceive.url";
-// const RAW_TEXT_DISCOVERED_SUBJECT: &str = "data.raw_text.discovered";
+const RAW_TEXT_DISCOVERED_SUBJECT: &str = "data.raw_text.discovered";
+
+async fn scrape_and_publish(
+    task: PerceiveUrlTask,
+    nats_client: Arc<NatsClient>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    log_info(&format!("Processing task for URL: {}", task.url));
+
+    let scraped_text = match scrape_url_content(&task.url).await {
+        Ok(text) => text,
+        Err(e) => {
+            log_error(&format!("Failed to scrape URL {}: {}", task.url, e));
+            return Err(e);
+        }
+    };
+
+    if scraped_text.is_empty() {
+        log_warn(&format!(
+            "Scraping URL {} yielded no text. Not publishing.",
+            task.url
+        ));
+        return Ok(());
+    }
+
+    log_info(&format!(
+        "Successfully scraped URL: {}. Text length: {}",
+        task.url,
+        scraped_text.len()
+    ));
+
+    let raw_msg = RawTextMessage {
+        id: Uuid::new_v4().to_string(),
+        source_url: task.url.clone(),
+        raw_text: scraped_text,
+        timestamp_ms: current_timestamp_ms(),
+    };
+
+    let Ok(payload_json) = serde_json::to_vec(&raw_msg) else {
+        log_error("Failed to serialize RawTextMessage to JSON");
+        return Err("Failed to serialize RawTextMessage".into());
+    };
+
+    log_info(&format!(
+        "Publishing RawTextMessage (id: {}) to subject: {}",
+        raw_msg.id, RAW_TEXT_DISCOVERED_SUBJECT
+    ));
+
+    if let Err(e) = nats_client
+        .publish(RAW_TEXT_DISCOVERED_SUBJECT, payload_json.into())
+        .await
+    {
+        log_error(&format!(
+            "Failed to publish RawTextMessage (id: {}) to NATS: {}",
+            raw_msg.id, e
+        ));
+        return Err(Box::new(e) as Box<dyn std::error::Error>);
+    } else {
+        log_info(&format!(
+            "Successfully published RawTextMessage (id: {})",
+            raw_msg.id
+        ));
+    }
+
+    Ok(())
+}
 
 async fn scrape_url_content(url: &str) -> Result<String, Box<dyn std::error::Error>> {
     log_info(&format!("Scraping URL: {}", url));
@@ -109,7 +175,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         nats_url
     ));
 
-    let client = match async_nats::connect(&nats_url).await {
+    let client = Arc::new(match async_nats::connect(&nats_url).await {
         Ok(client) => {
             log_info("Successfully connected to NATS!");
             client
@@ -118,7 +184,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             log_error(&format!("Failed to connect to NATS: {}", err));
             return Err(Box::new(err) as Box<dyn std::error::Error>);
         }
-    };
+    });
 
     let mut subscriber = match client.subscribe(PERCEPTION_URL_TASK_SUBJECT).await {
         Ok(sub) => {
@@ -146,34 +212,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             Ok(task) => {
                 log_info(&format!("Deserialized task for URL: {}", task.url));
 
-                match scrape_url_content(&task.url).await {
-                    Ok(scraped_text) => {
-                        if scraped_text.is_empty() {
-                            log_warn(&format!("Scraping URL {} yielded no text.", task.url));
-                        } else {
-                            log_info(&format!(
-                                "Successfully scraped URL: {}. Text length: {}",
-                                task.url,
-                                scraped_text.len()
-                            ));
-                        }
+                let nats_client_clone = Arc::clone(&client);
 
-                        let raw_msg = RawTextMessage {
-                            id: Uuid::new_v4().to_string(),
-                            source_url: task.url.clone(),
-                            raw_text: scraped_text,
-                            timestamp_ms: current_timestamp_ms(),
-                        };
-
-                        log_info(&format!(
-                            "[Stub] Would publish RawTextMessage with id: {}",
-                            raw_msg.id
-                        ));
+                tokio::spawn(async move {
+                    if let Err(e) = scrape_and_publish(task, nats_client_clone).await {
+                        log_error(&format!("Error during scrape_and_publish: {}", e));
                     }
-                    Err(e) => {
-                        log_error(&format!("Failed to scrape URL {}: {}", task.url, e));
-                    }
-                }
+                });
             }
             Err(e) => {
                 log_warn(&format!(
