@@ -1,0 +1,38 @@
+services:
+    neo4j:
+        image: neo4j:5.18.0
+        container_name: cs-neo4j
+        ports:
+            - '7474:7474'
+            - '7687:7687'
+        volumes:
+            - ./data/neo4j/data:/data
+            - ./data/neo4j/logs:/logs
+        environment:
+            - NEO4J_AUTH=${NEO4J_USERNAME}/${NEO4J_PASSWORD}
+        networks:
+            - symbiont-net
+
+    qdrant:
+        image: qdrant/qdrant:v1.7.4
+        container_name: cs-qdrant
+        ports:
+            - '6333:6333'
+            - '6334:6334'
+        volumes:
+            - ./data/qdrant_storage:/qdrant/storage
+        networks:
+            - symbiont-net
+
+    nats:
+        image: nats:2.10.7
+        container_name: cs-nats
+        ports:
+            - '4222:4222'
+            - '8222:8222'
+        networks:
+            - symbiont-net
+
+networks:
+    symbiont-net:
+        driver: bridge
