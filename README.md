@@ -15,7 +15,16 @@ An evolving AI organism pet project.
 
 ## Project Status
 
-The project has achieved its initial milestone and is now expanding its capabilities:
+The project is actively under development and has achieved key milestones:
+
+**MVP 2: Basic Text Generation & UI - COMPLETE (v0.2.0)**
+
+This milestone introduces the Symbiont's ability to generate text and interact with users via a web interface. Key capabilities include:
+
+1.  **Web UI (Next.js):** Users can submit URLs for processing, request text generation (with optional prompt and max length), and view status messages and generated text in real-time via Server-Sent Events (SSE).
+2.  **API Service (Rust/Actix Web):** Provides HTTP endpoints for the UI to submit tasks and an SSE endpoint to stream generated text. It acts as a gateway to the NATS messaging system.
+3.  **Text Generation Service (Rust):** Generates text based on a simple fixed Markov chain model. Receives tasks and publishes results via NATS.
+4.  **Integration:** All new services (`api_service`, `text_generator_service`, `frontend`) are containerized and orchestrated with Docker Compose.
 
 **MVP 1: Data Ingestion Pipeline - COMPLETE (v0.1.0)**
 
@@ -25,27 +34,22 @@ The first _initial_ milestone of "Codename: Symbiont" is complete. The system ca
 2.  Scrape the webpage for its main text content.
 3.  Perform basic text preprocessing including sentence segmentation and tokenization.
 4.  Store the document metadata, sentences, and extracted tokens into a Neo4j graph database.
-    All components are containerized using Docker and orchestrated with Docker Compose.
 
-**Text Generation Capabilities (Ongoing Development - v0.2.0 Unreleased)**
-
-The Symbiont is beginning to express itself:
-
--   **Text Generation:** The system can now generate novel text.
--   **`text_generator_service`:** A new dedicated service, `text_generator_service`, is responsible for this capability.
--   **Markov Chain Model:** Currently, generation is based on a simple fixed Markov chain model built from pre-processed text data.
--   **API Integration:**
-    -   An `api_service` provides an HTTP POST endpoint at `/api/generate-text` to trigger text generation.
-    -   Generated text segments are streamed back to the client via Server-Sent Events (SSE) on the `/api/events` endpoint.
+All components are containerized using Docker and orchestrated with Docker Compose.
 
 ## Core Tech Stack
 
--   **Language & Core Logic:** Rust
+-   **Backend & Core Logic:** Rust
+    -   Microservices: Actix Web (for API), Tokio, Async-NATS
+    -   Data Processing: `tokenizers` crate
+    -   Text Generation (MVP2): Basic Markov Chains
 -   **Microservices Communication:** NATS.io
--   **Knowledge Graph:** Neo4j
--   **Vector Memory:** Qdrant
+-   **Databases:**
+    -   Knowledge Graph: Neo4j
+    -   Vector Memory (planned for MVP3): Qdrant
 -   **UI:** Next.js (React/TypeScript) with Tailwind CSS
 -   **Containerization:** Docker, Docker Compose
+-   **Logging:** `log` + `env_logger` for Rust services.
 
 ## Getting Started
 
@@ -157,7 +161,16 @@ Running the Symbiont System:
 
 ## Roadmap
 
-[Trello](https://trello.com/b/0rCkQEeu/codename-symbiont)
+Track my progress and upcoming features on [Trello](https://trello.com/b/0rCkQEeu/codename-symbiont).
+
+-   ✅ **MVP 1: Data Ingestion & Storage Pipeline (v0.1.0)**
+-   ✅ **MVP 2: Basic Text Generation & UI (v0.2.0)**
+-   ➡️ **MVP 3 (In Progress/Planned): Advanced NLP & Vector Search Integration**
+    -   Integrate `candle` for ML model inference (e.g., sentence embeddings).
+    -   Utilize Qdrant for storing and querying text embeddings (`vector_memory_service`).
+    -   Implement semantic search API and UI features.
+    -   Improve Markov chain model by training on data from Neo4j.
+-   ... (Further ideas for evolution)
 
 The project continues to evolve. Recent developments include the introduction of text generation capabilities (see 'Project Status' above). Future work will focus on enhancing these generative models and further expanding the Symbiont's understanding of ingested data.
 
