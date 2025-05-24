@@ -1,22 +1,22 @@
+mod embedding_generator;
+use anyhow::{Context, Result};
+use embedding_generator::EmbeddingGenerator;
 use futures::StreamExt;
-use log::{error, info, warn};
+use log::{debug, error, info, warn};
 use serde_json;
-use shared_models::{RawTextMessage, TokenizedTextMessage, current_timestamp_ms};
-use std::collections::HashMap;
+use shared_models::{
+    RawTextMessage, SentenceEmbedding, TextWithEmbeddingsMessage, current_timestamp_ms,
+};
 use std::env;
 use std::sync::Arc;
 
-use tokenizers::decoders::sequence::Sequence;
-use tokenizers::models::bpe::{BPE, BpeBuilder, Vocab as TokenizersVocab};
-use tokenizers::normalizers::BertNormalizer;
-use tokenizers::pre_tokenizers::whitespace::Whitespace;
-use tokenizers::processors::bert::BertProcessing;
-use tokenizers::{TokenizerBuilder, TokenizerImpl};
-
 const RAW_TEXT_DISCOVERED_SUBJECT: &str = "data.raw_text.discovered";
-const PROCESSED_TEXT_TOKENIZED_SUBJECT: &str = "data.processed_text.tokenized";
+const TEXT_WITH_EMBEDDINGS_SUBJECT: &str = "data.text.with_embeddings";
 
-fn process_text_message(raw_msg: &RawTextMessage) -> Result<TokenizedTextMessage, String> {
+fn process_text_and_embed(
+    raw_msg: &RawTextMessage,
+    embed_generator: &EmbeddingGenerator,
+) -> Result<TextWithEmbeddingsMessage, String> {
     info!(
         "[text_processor] Processing text for id: {}, url: {}",
         raw_msg.id, raw_msg.source_url
@@ -27,22 +27,21 @@ fn process_text_message(raw_msg: &RawTextMessage) -> Result<TokenizedTextMessage
         .split_whitespace()
         .collect::<Vec<&str>>()
         .join(" ");
-
     if cleaned_text.is_empty() {
         warn!(
-            "[text_processor] Cleaned text is empty for id: {}",
+            "[TEXT_PROCESSOR_EMBED] Cleaned text is empty for id: {}",
             raw_msg.id
         );
         return Err(format!("Cleaned text is empty for id: {}", raw_msg.id));
     }
 
-    let mut sentences = Vec::new();
+    let mut sentences_str = Vec::new();
     let mut current_sentence_start = 0;
     for (i, character) in cleaned_text.char_indices() {
         if character == '.' || character == '?' || character == '!' {
             if i >= current_sentence_start {
                 let sentence_slice = &cleaned_text[current_sentence_start..=i];
-                sentences.push(sentence_slice.trim().to_string());
+                sentences_str.push(sentence_slice.trim().to_string());
                 current_sentence_start = i + 1;
             }
         }
@@ -51,138 +50,153 @@ fn process_text_message(raw_msg: &RawTextMessage) -> Result<TokenizedTextMessage
     if current_sentence_start < cleaned_text.len() {
         let remainder = cleaned_text[current_sentence_start..].trim();
         if !remainder.is_empty() {
-            sentences.push(remainder.to_string());
+            sentences_str.push(remainder.to_string());
         }
     }
 
-    if sentences.is_empty() && !cleaned_text.is_empty() {
-        sentences.push(cleaned_text.clone());
+    if sentences_str.is_empty() && !cleaned_text.is_empty() {
+        sentences_str.push(cleaned_text.clone());
     }
 
-    let mut vocab: TokenizersVocab = HashMap::new();
-    vocab.insert("<unk>".to_string(), 0);
-
-    let merges: Vec<(String, String)> = Vec::new();
-
-    let bpe_model = BpeBuilder::new()
-        .vocab_and_merges(vocab, merges)
-        .unk_token("<unk>".to_string())
-        .build()
-        .map_err(|e| format!("Failed to build BPE model: {:?}", e))?;
-
-    let tokenizer_result: Result<
-        TokenizerImpl<BPE, BertNormalizer, Whitespace, BertProcessing, Sequence>,
-        Box<dyn std::error::Error + Send + Sync>,
-    > = TokenizerBuilder::new()
-        .with_model(bpe_model)
-        .with_pre_tokenizer(Some(Whitespace::default()))
-        .build();
-
-    let tokenizer = match tokenizer_result {
-        Ok(tk) => tk,
-        Err(e) => {
-            error!("[text_processor] Failed to build tokenizer: {:?}", e);
-            return Err(format!("Failed to build tokenizer: {:?}", e));
-        }
-    };
-
-    let encoding_result = tokenizer.encode(cleaned_text.clone(), false);
-
-    let tokens: Vec<String> = match encoding_result {
-        Ok(encoding) => encoding.get_tokens().to_vec(),
-        Err(e) => {
-            error!(
-                "[text_processor] Tokenization failed for id {}: {:?}",
-                raw_msg.id, e,
-            );
-            return Err(format!(
-                "Tokenization failed for id {}: {:?}",
-                raw_msg.id, e
-            ));
-        }
-    };
-
-    if tokens.is_empty() && !cleaned_text.is_empty() {
+    if sentences_str.is_empty() {
         warn!(
-            "[text_processor] Tokenization yielded no tokens for id: {}, but cleaned text was not empty.",
-            raw_msg.id,
-        );
-        return Err(format!(
-            "Tokenization yielded no tokens for id: {}",
+            "[TEXT_PROCESSOR_EMBED] No sentences extracted for id: {}",
             raw_msg.id
-        ));
+        );
+        return Err(format!("No sentences extracted for id: {}", raw_msg.id));
     }
 
     info!(
-        "[text_processor] Extracted {} sentences and {} tokens for id: {}",
-        sentences.len(),
-        tokens.len(),
+        "[TEXT_PROCESSOR_EMBED] Extracted {} sentences for id: {}",
+        sentences_str.len(),
         raw_msg.id
     );
 
-    Ok(TokenizedTextMessage {
+    debug!(
+        "[TEXT_PROCESSOR_EMBED] Generating embeddings for {} sentences...",
+        sentences_str.len()
+    );
+
+    let embeddings = match embed_generator.generate_sentence_embeddings(&sentences_str) {
+        Ok(embs) => embs,
+        Err(e) => {
+            let err_msg = format!("Failed to generate embeddings for id {}: {}", raw_msg.id, e);
+            error!("[TEXT_PROCESSOR_EMBED] {}", err_msg);
+            return Err(err_msg);
+        }
+    };
+
+    if embeddings.len() != sentences_str.len() {
+        let err_msg = format!(
+            "Mismatch between number of sentences ({}) and embeddings ({}) for id: {}",
+            sentences_str.len(),
+            embeddings.len(),
+            raw_msg.id
+        );
+        error!("[TEXT_PROCESSOR_EMBED] {}", err_msg);
+        return Err(err_msg);
+    }
+    info!(
+        "[TEXT_PROCESSOR_EMBED] Successfully generated {} embeddings for id: {}",
+        embeddings.len(),
+        raw_msg.id
+    );
+
+    let embeddings_data: Vec<SentenceEmbedding> = sentences_str
+        .into_iter()
+        .zip(embeddings.into_iter())
+        .map(|(sentence, embedding)| SentenceEmbedding {
+            sentence_text: sentence,
+            embedding,
+        })
+        .collect();
+
+    Ok(TextWithEmbeddingsMessage {
         original_id: raw_msg.id.clone(),
         source_url: raw_msg.source_url.clone(),
-        tokens,
-        sentences,
+        embeddings_data,
+        model_name: "sentence-transformers/paraphrase-multilingual-mpnet-base-v2".to_string(),
         timestamp_ms: current_timestamp_ms(),
     })
 }
 
-async fn handle_raw_text_message(
+async fn handle_raw_text_message_and_publish_embeddings(
     raw_text_msg: RawTextMessage,
     nats_client: Arc<async_nats::Client>,
+    embed_generator: Arc<EmbeddingGenerator>,
 ) {
-    match process_text_message(&raw_text_msg) {
-        Ok(tokenized_msg) => {
+    match process_text_and_embed(&raw_text_msg, &embed_generator) {
+        Ok(msg_with_embeddings) => {
             info!(
-                "Text processed for original_id: {}. Publishing TokenizedTextMessage...",
-                tokenized_msg.original_id,
+                "[NATS_PUB_PREP] Text processed with embeddings for original_id: {}. Publishing...",
+                msg_with_embeddings.original_id
             );
 
-            match serde_json::to_vec(&tokenized_msg) {
+            match serde_json::to_vec(&msg_with_embeddings) {
                 Ok(payload_json) => {
                     if let Err(e) = nats_client
-                        .publish(PROCESSED_TEXT_TOKENIZED_SUBJECT, payload_json.into())
+                        .publish(TEXT_WITH_EMBEDDINGS_SUBJECT, payload_json.into())
                         .await
                     {
                         error!(
-                            "Failed to publish TokenizedTextMessage (original_id: {}): {}",
-                            tokenized_msg.original_id, e,
-                        )
+                            "[NATS_PUB_FAIL] Failed to publish TextWithEmbeddingsMessage (original_id: {}): {}",
+                            msg_with_embeddings.original_id, e
+                        );
                     } else {
                         info!(
-                            "Successfully published TokenizedTextMessage (original_id: {}) with {} tokens.",
-                            tokenized_msg.original_id,
-                            tokenized_msg.tokens.len(),
-                        )
+                            "[NATS_PUB_SUCCESS] Successfully published TextWithEmbeddingsMessage (original_id: {}) with {} embeddings.",
+                            msg_with_embeddings.original_id,
+                            msg_with_embeddings.embeddings_data.len()
+                        );
                     }
                 }
                 Err(e) => {
                     error!(
-                        "Failed to serialize TokenizedTextMessage (original_id: {}): {}",
-                        tokenized_msg.original_id, e,
-                    )
+                        "[SERIALIZE_FAIL] Failed to serialize TextWithEmbeddingsMessage (original_id: {}): {}",
+                        msg_with_embeddings.original_id, e
+                    );
                 }
             }
         }
         Err(e) => {
-            error!("Failed to process text for id {}: {}", raw_text_msg.id, e,)
+            error!(
+                "[PROCESS_TEXT_FAIL] Failed to process text with embeddings for id {}: {}",
+                raw_text_msg.id, e
+            );
         }
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
-    println!("[preprocessing_service] Starting...");
+    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info,preprocessing_service=debug,candle_core=warn,candle_nn=warn,candle_transformers=warn,tokenizers=warn,hf_hub=warn")).init();
+    println!("Starting with embedding generation capabilities...");
+
+    let model_id = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2";
+    let revision = "main".to_string();
+    let force_cpu = env::var("FORCE_CPU").map_or(false, |v| v == "1" || v.to_lowercase() == "true");
+
+    info!(
+        "[EMBED_INIT] Initializing EmbeddingGenerator with model: {}, revision: {}, force_cpu: {}",
+        model_id, revision, force_cpu
+    );
+
+    let embedding_generator = Arc::new(
+        EmbeddingGenerator::new(model_id, Some(revision), force_cpu)
+            .context("Failed to create EmbeddingGenerator during service startup")?,
+    );
+
+    info!("[EMBED_INIT_SUCCESS] EmbeddingGenerator initialized successfully.");
 
     let nats_url = env::var("NATS_URL").unwrap_or_else(|_| {
-        warn!("NATS_URL not set, defaulting to nats://localhost:4222");
+        warn!("[NATS_CONFIG] NATS_URL not set, defaulting to nats://localhost:4222");
         "nats://localhost:4222".to_string()
     });
-
-    info!("Attempting to connect to NATS server at {}...", nats_url,);
+    info!(
+        "[NATS_CONNECT] Attempting to connect to NATS server at {}...",
+        nats_url
+    );
+    let nats_client = Arc::new(async_nats::connect(&nats_url).await.map_err(Box::new)?);
 
     let client = match async_nats::connect(&nats_url).await {
         Ok(client) => {
@@ -209,7 +223,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
 
-    info!("Waiting for raw text messages...");
+    info!("[NATS_LOOP] Waiting for raw text messages to process and embed...");
 
     while let Some(message) = subscriber.next().await {
         info!("Received message on subject: {}", message.subject);
@@ -221,10 +235,16 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                     raw_text_msg.id, raw_text_msg.source_url,
                 );
 
-                let nats_client_clone = Arc::clone(&client);
+                let nats_client_clone = Arc::clone(&nats_client);
+                let embed_generator_clone = Arc::clone(&embedding_generator);
 
                 tokio::spawn(async move {
-                    handle_raw_text_message(raw_text_msg, nats_client_clone).await;
+                    handle_raw_text_message_and_publish_embeddings(
+                        raw_text_msg,
+                        nats_client_clone,
+                        embed_generator_clone,
+                    )
+                    .await;
                 });
             }
             Err(e) => {
