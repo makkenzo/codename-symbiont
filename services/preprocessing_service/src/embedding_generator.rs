@@ -70,7 +70,38 @@ impl EmbeddingGenerator {
         let config_str = std::fs::read_to_string(config_filename)?;
         let config: BertConfig = serde_json::from_str(&config_str)?;
 
-        let tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(anyhow::Error::msg)?;
+        let mut tokenizer = Tokenizer::from_file(tokenizer_filename).map_err(anyhow::Error::msg)?;
+
+        let max_seq_len_for_tokenizer = config.max_position_embeddings as usize;
+        let pad_token_str = "[PAD]";
+        let pad_token_id = tokenizer
+            .token_to_id(pad_token_str)
+            .unwrap_or_else(|| {
+                println!("[EmbeddingGenerator] WARN: '{}' token not explicitly found in tokenizer vocab by token_to_id. Assuming pad_token_id = 0.", pad_token_str);
+                0 
+            });
+        let padding_params = tokenizers::PaddingParams {
+            strategy: tokenizers::PaddingStrategy::Fixed(max_seq_len_for_tokenizer),
+            direction: tokenizers::PaddingDirection::Right,
+            pad_id: pad_token_id,
+            pad_type_id: 0,
+            pad_token: "[PAD]".to_string(),
+            pad_to_multiple_of: None,
+        };
+        tokenizer.with_padding(Some(padding_params));
+
+        let truncation_params = tokenizers::TruncationParams {
+            max_length: max_seq_len_for_tokenizer,
+            strategy: tokenizers::TruncationStrategy::LongestFirst,
+            stride: 0,
+            direction: tokenizers::TruncationDirection::Right,
+        };
+        let _ = tokenizer.with_truncation(Some(truncation_params));
+
+        println!(
+            "[EmbeddingGenerator] Tokenizer configured with padding and truncation to max_seq_len: {}",
+            max_seq_len_for_tokenizer
+        );
 
         let vb = unsafe {
             if model_filenames
