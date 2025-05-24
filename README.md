@@ -69,7 +69,11 @@ Running the Symbiont System:
 3.  **Environment Configuration:**
 
     -   Copy the example environment file: `cp .env.example .env`
-    -   Edit `.env` and set your desired `NEO4J_PASSWORD`. The default `NEO4J_USER` is `neo4j`.
+    -   Edit `.env` and set your desired `NEO4J_PASSWORD` (default user is `neo4j`).
+    -   You can also configure `API_SERVER_PORT` (defaults to 8080, for the API service) and `FRONTEND_PORT` (defaults to 3000, for the Web UI).
+    -   The `.env` file also defines:
+        -   `NEXT_PUBLIC_API_URL_FOR_FRONTEND_BUILD` (e.g., `http://localhost:${API_SERVER_PORT}/api`): This URL is embedded into the frontend during its build process to allow it to communicate with the API service.
+        -   `NEXT_PUBLIC_API_URL_FOR_FRONTEND_RUNTIME` (e.g., `http://cs-api-service:${API_SERVER_INTERNAL_PORT}/api`): This URL is used by the running frontend container to communicate with the API service container. Users typically do not need to change this, as it's for internal Docker network communication and relies on `API_SERVER_INTERNAL_PORT`.
 
 4.  **Build and run the services:**
 
@@ -77,13 +81,25 @@ Running the Symbiont System:
     docker-compose up --build
     ```
 
-    This will build the Rust services and start all containers (NATS, Neo4j, Qdrant, and the Symbiont services). Wait for all services to initialize. You should see logs indicating they are ready.
+    This will build the Rust services and start all containers (NATS, Neo4j, Qdrant, the Symbiont services, and the frontend service). Wait for all services to initialize. You should see logs indicating they are ready. A web interface will be available.
 
 5.  **Interacting with the System:**
 
     Once the system is running, you can interact with it in several ways:
 
+    -   **Web UI:**
+        The primary way to interact with the Symbiont system is now through its web interface.
+        It is typically accessible at `http://localhost:3000` (or the `FRONTEND_PORT` you've configured in the `.env` file).
+
+        The Web UI provides the following functionalities:
+
+        -   **Submit URLs:** Input URLs for the system to scrape, process, and add to its knowledge graph.
+        -   **Generate Text:** Initiate text generation. You can provide an optional prompt and specify the maximum length of the desired text.
+        -   **Real-time Updates:** View status messages and the generated text output, which updates in real-time via Server-Sent Events (SSE) from the `api_service`.
+
     -   **Submitting URLs for Processing:**
+        (Note: This action can also be performed via the Web UI. The methods below detail API/CLI interactions, suitable for advanced users or scripting.)
+
         This is part of the data ingestion pipeline. You can submit URLs via:
 
         -   **NATS (CLI):** Open a new terminal and use `nats-cli`:
@@ -93,6 +109,8 @@ Running the Symbiont System:
         -   **HTTP API:** The `api_service` also exposes an endpoint for this at `POST /api/submit-url`.
 
     -   **Generating Text:**
+        (Note: This action, including receiving generated text via SSE, can also be performed via the Web UI. The methods below detail API/CLI interactions, suitable for advanced users or scripting.)
+
         Send a POST request to the `api_service` to trigger text generation. By default, the `api_service` listens on port 8080.
 
         **Endpoint:** `POST http://localhost:8080/api/generate-text`
