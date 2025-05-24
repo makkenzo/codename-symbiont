@@ -1,6 +1,6 @@
 use actix_cors::Cors;
 use actix_web::{App, Error as ActixError, HttpResponse, HttpServer, Responder, http::header, web};
-use actix_web_lab::sse::{self, Data as SseData, Event as SseEvent, Sse};
+use actix_web_lab::sse::{Data as SseData, Event as SseEvent, Sse};
 use async_nats::Client as NatsClient;
 use futures::StreamExt;
 use log::{debug, error, info, warn};

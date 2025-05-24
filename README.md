@@ -44,7 +44,7 @@ The Symbiont is beginning to express itself:
 -   **Microservices Communication:** NATS.io
 -   **Knowledge Graph:** Neo4j
 -   **Vector Memory:** Qdrant
--   **UI:** Rust + WASM (Yew/Dioxus)
+-   **UI:** Next.js (React/TypeScript) with Tailwind CSS
 -   **Containerization:** Docker, Docker Compose
 
 ## Getting Started
