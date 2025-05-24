@@ -89,6 +89,23 @@ services:
         networks:
             - symbiont-net
 
+    api_service:
+        container_name: cs-api-service
+        build:
+            context: .
+            dockerfile: ./services/api_service/Dockerfile
+        ports:
+            - '${API_SERVER_PORT:-8080}:8080'
+        depends_on:
+            - nats
+        environment:
+            - NATS_URL=nats://cs-nats:4222
+            - API_SERVER_HOST=0.0.0.0
+            - API_SERVER_PORT=8080
+            - RUST_LOG=info,api_service=debug,actix_web=info,actix_server=info
+        networks:
+            - symbiont-net
+
 networks:
     symbiont-net:
         driver: bridge
