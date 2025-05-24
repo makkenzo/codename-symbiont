@@ -19,3 +19,4 @@ uuid = { version = "1", features = ["v4", "serde"] }
 actix-web-lab = "0.24.1"
 async-stream = "0.3"
 tokio-stream = { version = "0.1", features = ["sync"] }
+actix-cors = "0.7"

@@ -1,4 +1,5 @@
-use actix_web::{App, Error as ActixError, HttpResponse, HttpServer, Responder, web};
+use actix_cors::Cors;
+use actix_web::{App, Error as ActixError, HttpResponse, HttpServer, Responder, http::header, web};
 use actix_web_lab::sse::{self, Data as SseData, Event as SseEvent, Sse};
 use async_nats::Client as NatsClient;
 use futures::StreamExt;
@@ -302,7 +303,22 @@ async fn main() -> std::io::Result<()> {
     );
 
     HttpServer::new(move || {
+        let cors = Cors::default()
+            .allowed_origin_fn(|origin, _req_head| {
+                origin.as_bytes().starts_with(b"http://localhost")
+                    || origin.as_bytes().starts_with(b"http://marchenzo")
+                    || origin.as_bytes().starts_with(b"http://127.0.0.1")
+            })
+            .allowed_methods(vec!["GET", "POST", "OPTIONS"])
+            .allowed_headers(vec![
+                header::AUTHORIZATION,
+                header::ACCEPT,
+                header::CONTENT_TYPE,
+            ])
+            .max_age(3600);
+
         App::new()
+            .wrap(cors)
             .app_data(web::Data::new(AppState {
                 nats_client: Arc::clone(&nats_client),
                 sse_tx: sse_tx.clone(),
