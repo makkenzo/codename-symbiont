@@ -17,6 +17,16 @@ An evolving AI organism pet project.
 
 The project is actively under development and has achieved key milestones:
 
+**MVP 3: Advanced NLP & Vector Search Integration - COMPLETE (v0.3.0)**
+
+This milestone significantly enhances the Symbiont's understanding and retrieval capabilities by:
+
+1.  **Embedding Generation (`preprocessing_service`):** Text is now processed into sentence embeddings using the `candle` ML framework (with a `sentence-transformers` model). This allows for understanding semantic similarity.
+2.  **Vector Storage (`vector_memory_service`):** A new service stores these embeddings and associated metadata in a Qdrant vector database.
+3.  **Semantic Search (API & UI):**
+    -   The `api_service` now orchestrates a semantic search pipeline, converting user queries into embeddings and querying the `vector_memory_service`.
+    -   The **Web UI (`frontend`)** features a new section allowing users to perform semantic searches over the ingested and processed data, viewing relevant text snippets, their sources, and similarity scores.
+
 **MVP 2: Basic Text Generation & UI - COMPLETE (v0.2.0)**
 
 This milestone introduces the Symbiont's ability to generate text and interact with users via a web interface. Key capabilities include:
@@ -41,12 +51,12 @@ All components are containerized using Docker and orchestrated with Docker Compo
 
 -   **Backend & Core Logic:** Rust
     -   Microservices: Actix Web (for API), Tokio, Async-NATS
-    -   Data Processing: `tokenizers` crate
+    -   Data Processing: `tokenizers` crate, `candle` (for ML inference/embeddings)
     -   Text Generation (MVP2): Basic Markov Chains
 -   **Microservices Communication:** NATS.io
 -   **Databases:**
     -   Knowledge Graph: Neo4j
-    -   Vector Memory (planned for MVP3): Qdrant
+    -   Vector Memory: Qdrant (using `qdrant-client`)
 -   **UI:** Next.js (React/TypeScript) with Tailwind CSS
 -   **Containerization:** Docker, Docker Compose
 -   **Logging:** `log` + `env_logger` for Rust services.
@@ -100,6 +110,7 @@ Running the Symbiont System:
         -   **Submit URLs:** Input URLs for the system to scrape, process, and add to its knowledge graph.
         -   **Generate Text:** Initiate text generation. You can provide an optional prompt and specify the maximum length of the desired text.
         -   **Real-time Updates:** View status messages and the generated text output, which updates in real-time via Server-Sent Events (SSE) from the `api_service`.
+        -   **Semantic Search:** Perform searches based on semantic similarity. Input a query, and the system will find the most relevant text snippets from the data it has processed. Results include the text, source URL, and similarity score.
 
     -   **Submitting URLs for Processing:**
         (Note: This action can also be performed via the Web UI. The methods below detail API/CLI interactions, suitable for advanced users or scripting.)
@@ -165,11 +176,15 @@ Track my progress and upcoming features on [Trello](https://trello.com/b/0rCkQEe
 
 -   ✅ **MVP 1: Data Ingestion & Storage Pipeline (v0.1.0)**
 -   ✅ **MVP 2: Basic Text Generation & UI (v0.2.0)**
--   ➡️ **MVP 3 (In Progress/Planned): Advanced NLP & Vector Search Integration**
-    -   Integrate `candle` for ML model inference (e.g., sentence embeddings).
+-   ✅ **MVP 3: Advanced NLP & Vector Search Integration (v0.3.0)**
+    -   Integrated `candle` for ML model inference (sentence embeddings).
     -   Utilize Qdrant for storing and querying text embeddings (`vector_memory_service`).
-    -   Implement semantic search API and UI features.
-    -   Improve Markov chain model by training on data from Neo4j.
+    -   Implemented semantic search API and UI features.
+-   ➡️ **MVP 4 (Planned/In Progress): Enhanced Generation & Knowledge Integration**
+    -   Improve Markov chain model by training on data from Neo4j/Qdrant context.
+    -   **OR** Explore advanced text generation with `candle` (e.g., smaller GPT-2 or other generative models).
+    -   Integrate knowledge graph data more deeply with search and generation (e.g., RAG-like patterns).
+    -   Refine text processing pipeline (e.g., better sentence segmentation, NER).
 -   ... (Further ideas for evolution)
 
 The project continues to evolve. Recent developments include the introduction of text generation capabilities (see 'Project Status' above). Future work will focus on enhancing these generative models and further expanding the Symbiont's understanding of ingested data.

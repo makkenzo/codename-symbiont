@@ -7,13 +7,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] - 25-05-2025
+
 ### Added
 
--   **MVP 3 (Planned): Advanced NLP & Vector Search Integration**
-    -   Integration with `candle` for ML model inference (e.g., sentence embeddings).
-    -   `vector_memory_service` to store and query text embeddings using Qdrant.
-    -   API endpoint for semantic search.
-    -   UI integration for semantic search.
+-   **MVP 3: Advanced NLP (Embedding Generation) & Semantic Search Integration**
+    -   **`preprocessing_service` (Enhancement):**
+        -   Integrated the `candle` ML framework for Rust.
+        -   Implemented `embedding_generator.rs` for generating sentence embeddings.
+        -   Utilizes the `sentence-transformers/paraphrase-multilingual-mpnet-base-v2` model (from Hugging Face Hub) with CUDA support (if available) and CPU fallback.
+        -   The service now subscribes to `data.raw_text.discovered`, segments text into sentences, and generates embeddings for them.
+        -   Publishes `TextWithEmbeddingsMessage` (containing original ID, URL, embedding data, model name) to the `data.text.with_embeddings` NATS subject.
+    -   **`vector_memory_service` (New Service):**
+        -   Created a new Rust service for managing vector memory.
+        -   Connects to Qdrant.
+        -   On startup, checks for the existence of the `symbiont_document_embeddings` collection (vector dimension 768, Cosine metric) and creates it if absent.
+        -   Subscribes to the `data.text.with_embeddings` NATS subject.
+        -   Stores received sentence embeddings and their metadata (document ID, URL, sentence text, order, model name, processing timestamp) in Qdrant.
+        -   Implemented a NATS handler (`tasks.search.semantic.request`) that accepts a query vector and `top_k`, performs a semantic search in Qdrant, and returns results via NATS request-reply.
+        -   Added a Dockerfile for the service.
+    -   **`api_service` (Enhancement):**
+        -   Added a new HTTP endpoint: `POST /api/search/semantic`.
+        -   Implemented semantic search orchestration logic:
+            1.  Receives a query text and `top_k` from the client.
+            2.  Sends the query text to `preprocessing_service` (via NATS request-reply on `tasks.embedding.for_query`) to obtain an embedding.
+            3.  Sends the received embedding and `top_k` to `vector_memory_service` (via NATS request-reply on `tasks.search.semantic.request`) to perform the search.
+            4.  Returns the search results (list of `SemanticSearchResultItem`) to the client.
+        -   Implemented timeout and error handling for NATS interactions with other services.
+    -   **`frontend` (Enhancement):**
+        -   Added a new section to the UI for semantic search.
+        -   Users can input a text query and specify the desired number of results (`top_k`).
+        -   Implemented request submission to the `/api/search/semantic` endpoint.
+        -   Semantic search results (found sentence text, source URL, similarity score, metadata) are displayed in the UI.
+        -   Added new TypeScript interfaces for typing semantic search data.
+    -   **`shared_models` (Enhancement):**
+        -   Added new Rust structs to support semantic search functionality:
+            -   `SemanticSearchApiRequest` (HTTP request to `api_service`)
+            -   `QueryForEmbeddingTask` (NATS: `api_service` -> `preprocessing_service`)
+            -   `QueryEmbeddingResult` (NATS: `preprocessing_service` -> `api_service`)
+            -   `QdrantPointPayload` (payload structure for Qdrant points)
+            -   `SemanticSearchNatsTask` (NATS: `api_service` -> `vector_memory_service`)
+            -   `SemanticSearchResultItem` (search result item)
+            -   `SemanticSearchNatsResult` (NATS: `vector_memory_service` -> `api_service`)
+            -   `SemanticSearchApiResponse` (HTTP response from `api_service`)
+    -   **Docker & Orchestration:**
+        -   Updated `docker-compose.yml` to include the `vector_memory_service`.
+        -   Adjusted Dockerfiles for `preprocessing_service` (e.g., CUDA dependencies if GPU is used, `HF_HOME` volume) and other services as needed.
+
+### Changed
+
+-   **`preprocessing_service`:** The primary function has shifted from simple tokenization to embedding generation. The old logic for publishing `TokenizedTextMessage` (and its consumption by `knowledge_graph_service`) remains for now, but the main new output is `TextWithEmbeddingsMessage`.
+    _(Note: Future work will need to address how `knowledge_graph_service` integrates with these new embeddings or if the services' responsibilities need further separation regarding text processing stages.)_
+
+### Fixed
+
+-   Improved error and timeout handling for NATS request-reply patterns in `api_service`.
 
 ## [0.2.0] - 24-05-2025
 
