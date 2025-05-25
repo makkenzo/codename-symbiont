@@ -14,7 +14,7 @@ services:
             - symbiont-net
 
     qdrant:
-        image: qdrant/qdrant:v1.7.4
+        image: qdrant/qdrant:v1.14.0
         container_name: cs-qdrant
         ports:
             - '6333:6333'
