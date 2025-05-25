@@ -5,16 +5,23 @@ use async_nats::Client as NatsClient;
 use futures::StreamExt;
 use log::{debug, error, info, warn};
 use serde::{Deserialize, Serialize};
-use shared_models::{GenerateTextTask, GeneratedTextMessage, PerceiveUrlTask};
+use shared_models::{
+    GenerateTextTask, GeneratedTextMessage, PerceiveUrlTask, QueryEmbeddingResult,
+    QueryForEmbeddingTask, SemanticSearchApiRequest, SemanticSearchApiResponse,
+    SemanticSearchNatsResult, SemanticSearchNatsTask,
+};
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::broadcast;
 use tokio_stream::wrappers::{BroadcastStream, errors::BroadcastStreamRecvError};
+use uuid::Uuid;
 
 const PERCEPTION_URL_TASK_SUBJECT: &str = "tasks.perceive.url";
 const GENERATE_TEXT_TASK_SUBJECT: &str = "tasks.generation.text";
 const TEXT_GENERATED_EVENT_SUBJECT: &str = "events.text.generated";
+const EMBEDDING_FOR_QUERY_NATS_SUBJECT: &str = "tasks.embedding.for_query";
+const SEMANTIC_SEARCH_NATS_SUBJECT: &str = "tasks.search.semantic.request";
 
 #[derive(Serialize, Clone)]
 struct ApiResponse {
@@ -262,6 +269,248 @@ async fn nats_to_sse_listener(nats_client: Arc<NatsClient>, sse_tx: broadcast::S
     }
 }
 
+async fn semantic_search_handler(
+    http_payload: web::Json<SemanticSearchApiRequest>,
+    app_state: web::Data<AppState>,
+) -> impl Responder {
+    let search_api_req = http_payload.into_inner();
+    let client_request_id = Uuid::new_v4().to_string();
+
+    info!(
+        "[API_SEARCH_HANDLER] Received semantic search request (client_req_id: {}): query='{}', top_k={}",
+        client_request_id, search_api_req.query_text, search_api_req.top_k
+    );
+
+    let embedding_task = QueryForEmbeddingTask {
+        request_id: client_request_id.clone(),
+        text_to_embed: search_api_req.query_text.clone(),
+    };
+
+    let embedding_task_payload_json = match serde_json::to_vec(&embedding_task) {
+        Ok(json) => json,
+        Err(e) => {
+            error!(
+                "[API_SEARCH_HANDLER] Failed to serialize QueryForEmbeddingTask (client_req_id: {}): {}",
+                client_request_id, e
+            );
+            return HttpResponse::InternalServerError().json(SemanticSearchApiResponse {
+                search_request_id: client_request_id,
+                results: vec![],
+                error_message: Some("Internal error: Failed to prepare embedding task".to_string()),
+            });
+        }
+    };
+
+    info!(
+        "[API_SEARCH_HANDLER] Requesting embedding for query (client_req_id: {}) from preprocessing_service on subject '{}'",
+        client_request_id, EMBEDDING_FOR_QUERY_NATS_SUBJECT
+    );
+
+    let embedding_response_msg = match tokio::time::timeout(
+        Duration::from_secs(15),
+        app_state.nats_client.request(
+            EMBEDDING_FOR_QUERY_NATS_SUBJECT.to_string(),
+            embedding_task_payload_json.into(),
+        ),
+    )
+    .await
+    {
+        Ok(result) => match result {
+            Ok(msg) => msg,
+            Err(e) => {
+                error!(
+                    "[API_SEARCH_HANDLER] NATS request for embedding failed (client_req_id: {}): {}",
+                    client_request_id, e
+                );
+                return HttpResponse::ServiceUnavailable().json(SemanticSearchApiResponse {
+                    search_request_id: client_request_id,
+                    results: vec![],
+                    error_message: Some(format!(
+                        "Failed to get embedding from preprocessing service: {}",
+                        e
+                    )),
+                });
+            }
+        },
+        Err(_) => {
+            error!(
+                "[API_SEARCH_HANDLER] NATS request for embedding timed out after 15 seconds (client_req_id: {})",
+                client_request_id
+            );
+            return HttpResponse::ServiceUnavailable().json(SemanticSearchApiResponse {
+                search_request_id: client_request_id,
+                results: vec![],
+                error_message: Some(
+                    "Timeout: Failed to get embedding from preprocessing service within 15 seconds"
+                        .to_string(),
+                ),
+            });
+        }
+    };
+
+    let embedding_result: QueryEmbeddingResult = match serde_json::from_slice(
+        &embedding_response_msg.payload,
+    ) {
+        Ok(res) => res,
+        Err(e) => {
+            error!(
+                "[API_SEARCH_HANDLER] Failed to deserialize QueryEmbeddingResult (client_req_id: {}): {}",
+                client_request_id, e
+            );
+            return HttpResponse::InternalServerError().json(SemanticSearchApiResponse {
+                search_request_id: client_request_id,
+                results: vec![],
+                error_message: Some(
+                    "Internal error: Failed to parse embedding service response".to_string(),
+                ),
+            });
+        }
+    };
+
+    if let Some(err_msg) = embedding_result.error_message {
+        error!(
+            "[API_SEARCH_HANDLER] Preprocessing service returned error for embedding (client_req_id: {}): {}",
+            client_request_id, err_msg
+        );
+        return HttpResponse::InternalServerError().json(SemanticSearchApiResponse {
+            search_request_id: client_request_id,
+            results: vec![],
+            error_message: Some(format!("Error from preprocessing service: {}", err_msg)),
+        });
+    }
+
+    let query_embedding = match embedding_result.embedding {
+        Some(emb) => emb,
+        None => {
+            error!(
+                "[API_SEARCH_HANDLER] Preprocessing service returned no embedding and no error (client_req_id: {})",
+                client_request_id
+            );
+            return HttpResponse::InternalServerError().json(SemanticSearchApiResponse {
+                search_request_id: client_request_id,
+                results: vec![],
+                error_message: Some(
+                    "Preprocessing service did not return an embedding.".to_string(),
+                ),
+            });
+        }
+    };
+    info!(
+        "[API_SEARCH_HANDLER] Successfully received embedding for query (client_req_id: {}). Model: {:?}",
+        client_request_id, embedding_result.model_name
+    );
+
+    let search_nats_task = SemanticSearchNatsTask {
+        request_id: client_request_id.clone(),
+        query_embedding,
+        top_k: search_api_req.top_k,
+    };
+
+    let search_nats_task_payload_json = match serde_json::to_vec(&search_nats_task) {
+        Ok(json) => json,
+        Err(e) => {
+            error!(
+                "[API_SEARCH_HANDLER] Failed to serialize SemanticSearchNatsTask (client_req_id: {}): {}",
+                client_request_id, e
+            );
+            return HttpResponse::InternalServerError().json(SemanticSearchApiResponse {
+                search_request_id: client_request_id,
+                results: vec![],
+                error_message: Some("Internal error: Failed to prepare search task".to_string()),
+            });
+        }
+    };
+
+    info!(
+        "[API_SEARCH_HANDLER] Requesting semantic search (client_req_id: {}) from vector_memory_service on subject '{}'",
+        client_request_id, SEMANTIC_SEARCH_NATS_SUBJECT
+    );
+
+    let search_response_msg = match tokio::time::timeout(
+        Duration::from_secs(20),
+        app_state.nats_client.request(
+            SEMANTIC_SEARCH_NATS_SUBJECT.to_string(),
+            search_nats_task_payload_json.into(),
+        ),
+    )
+    .await
+    {
+        Ok(result) => match result {
+            Ok(msg) => msg,
+            Err(e) => {
+                error!(
+                    "[API_SEARCH_HANDLER] NATS request for search failed (client_req_id: {}): {}",
+                    client_request_id, e
+                );
+                return HttpResponse::ServiceUnavailable().json(SemanticSearchApiResponse {
+                    search_request_id: client_request_id,
+                    results: vec![],
+                    error_message: Some(format!(
+                        "Failed to get search results from vector memory service: {}",
+                        e
+                    )),
+                });
+            }
+        },
+        Err(_) => {
+            error!(
+                "[API_SEARCH_HANDLER] NATS request for search timed out after 20 seconds (client_req_id: {})",
+                client_request_id
+            );
+            return HttpResponse::ServiceUnavailable().json(SemanticSearchApiResponse {
+            search_request_id: client_request_id,
+            results: vec![],
+            error_message: Some(
+                "Timeout: Failed to get search results from vector memory service within 20 seconds".to_string()
+            ),
+        });
+        }
+    };
+
+    let search_nats_result: SemanticSearchNatsResult = match serde_json::from_slice(
+        &search_response_msg.payload,
+    ) {
+        Ok(res) => res,
+        Err(e) => {
+            error!(
+                "[API_SEARCH_HANDLER] Failed to deserialize SemanticSearchNatsResult (client_req_id: {}): {}",
+                client_request_id, e
+            );
+            return HttpResponse::InternalServerError().json(SemanticSearchApiResponse {
+                search_request_id: client_request_id,
+                results: vec![],
+                error_message: Some(
+                    "Internal error: Failed to parse search service response".to_string(),
+                ),
+            });
+        }
+    };
+
+    if let Some(err_msg) = search_nats_result.error_message {
+        error!(
+            "[API_SEARCH_HANDLER] Vector memory service returned error for search (client_req_id: {}): {}",
+            client_request_id, err_msg
+        );
+        return HttpResponse::InternalServerError().json(SemanticSearchApiResponse {
+            search_request_id: client_request_id,
+            results: vec![],
+            error_message: Some(format!("Error from vector memory service: {}", err_msg)),
+        });
+    }
+
+    info!(
+        "[API_SEARCH_HANDLER] Successfully received {} search results for client_req_id: {}",
+        search_nats_result.results.len(),
+        client_request_id
+    );
+
+    HttpResponse::Ok().json(SemanticSearchApiResponse {
+        search_request_id: client_request_id,
+        results: search_nats_result.results,
+        error_message: None,
+    })
+}
+
 #[actix_web::main]
 async fn main() -> std::io::Result<()> {
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
@@ -327,7 +576,8 @@ async fn main() -> std::io::Result<()> {
                 web::scope("/api")
                     .route("/submit-url", web::post().to(submit_url_handler))
                     .route("/generate-text", web::post().to(generate_text_handler))
-                    .route("/events", web::get().to(sse_events_handler)),
+                    .route("/events", web::get().to(sse_events_handler))
+                    .route("/search/semantic", web::post().to(semantic_search_handler)),
             )
     })
     .bind((server_host, server_port))?
