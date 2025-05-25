@@ -56,8 +56,16 @@ services:
         environment:
             - NATS_URL=nats://cs-nats:4222
             - RUST_LOG=info,preprocessing_service=debug
+            - HF_HOME=/opt/hf_home
         networks:
             - symbiont-net
+        volumes:
+            - ./data/hf_cache:/root/.cache/huggingface
+        deploy:
+            resources:
+                reservations:
+                    devices:
+                        - capabilities: [gpu]
 
     knowledge_graph_service:
         container_name: cs-knowledge-graph-service

@@ -136,97 +136,89 @@ impl EmbeddingGenerator {
             return Ok(Vec::new());
         }
         println!(
-            "[EmbeddingGenerator] Generating embeddings for {} sentences...",
+            "[EmbeddingGenerator] Attempting to generate embeddings for {} sentences...",
             sentences.len()
         );
 
         let max_seq_len = self.config.max_position_embeddings as usize;
+        let mut all_generated_embeddings: Vec<Vec<f32>> = Vec::with_capacity(sentences.len());
 
-        let inputs: Vec<EncodeInput> = sentences.iter().map(|s| s.as_str().into()).collect();
-        let encodings = self
-            .tokenizer
-            .encode_batch(inputs, true)
-            .map_err(anyhow::Error::msg)?;
+        let processing_batch_size = 8;
 
-        let batch_size = encodings.len();
-        if batch_size == 0 {
-            return Ok(Vec::new());
-        }
+        for sentence_chunk in sentences.chunks(processing_batch_size) {
+            let current_batch_of_sentences: Vec<String> = sentence_chunk.iter().map(|s| s.to_string()).collect();
+            let current_batch_len = current_batch_of_sentences.len();
+            if current_batch_len == 0 {
+                continue;
+            }
 
-        let actual_seq_len_from_tokenizer: usize;
-        if !encodings.is_empty() {
-            actual_seq_len_from_tokenizer = encodings[0].get_ids().len();
-            if actual_seq_len_from_tokenizer > max_seq_len {
-                anyhow::bail!(
-                    "Tokenizer returned sequence length {} which is greater than model max_seq_len {}",
-                    actual_seq_len_from_tokenizer,
-                    max_seq_len
+             println!(
+                "[EmbeddingGenerator] Processing batch of {} sentences. Max seq len: {}",
+                current_batch_len, max_seq_len
+            );
+
+            let inputs: Vec<EncodeInput> = current_batch_of_sentences.iter().map(|s| s.as_str().into()).collect();
+            let encodings = self
+                .tokenizer
+                .encode_batch(inputs, true) 
+                .map_err(anyhow::Error::msg)?;
+
+            let actual_seq_len_from_tokenizer = if !encodings.is_empty() {
+                encodings[0].get_ids().len()
+            } else {
+                anyhow::bail!("Empty encodings for a non-empty sentence batch, this should not happen.");
+            };
+
+            if actual_seq_len_from_tokenizer != max_seq_len {
+                 anyhow::bail!(
+                    "Tokenizer returned sequence length {} but model/padding is configured for {}",
+                    actual_seq_len_from_tokenizer, max_seq_len
                 );
             }
-        } else {
-            actual_seq_len_from_tokenizer = max_seq_len;
+
+            let mut all_input_ids: Vec<u32> = Vec::with_capacity(current_batch_len * max_seq_len);
+            let mut all_attention_masks: Vec<u32> = Vec::with_capacity(current_batch_len * max_seq_len);
+            let mut all_token_type_ids: Vec<u32> = Vec::with_capacity(current_batch_len * max_seq_len);
+
+            for encoding in &encodings {
+                all_input_ids.extend_from_slice(encoding.get_ids());
+                all_attention_masks.extend_from_slice(encoding.get_attention_mask());
+                all_token_type_ids.extend_from_slice(encoding.get_type_ids());
+            }
+
+            let input_ids = Tensor::from_vec(all_input_ids, (current_batch_len, max_seq_len), &self.device)?;
+            let attention_mask_tensor = Tensor::from_vec(all_attention_masks, (current_batch_len, max_seq_len), &self.device)?;
+            let token_type_ids = Tensor::from_vec(all_token_type_ids, (current_batch_len, max_seq_len), &self.device)?;
+
+            println!(
+                "[EmbeddingGenerator] Input tensors created for batch (shape: [{}, {}]). Running model forward pass...",
+                current_batch_len, max_seq_len
+            );
+
+            let hidden_states = self.model.forward(&input_ids, &token_type_ids, Some(&attention_mask_tensor))?;
+            println!("[EmbeddingGenerator] Model forward pass complete for batch. Performing mean pooling...");
+
+            let attention_mask_f32 = attention_mask_tensor.to_dtype(DType::F32)?;
+            let attention_mask_expanded = attention_mask_f32.unsqueeze(D::Minus1)?;
+            let masked_embeddings = hidden_states.broadcast_mul(&attention_mask_expanded)?;
+            let sum_embeddings = masked_embeddings.sum_keepdim(1)?;
+            let sum_mask = attention_mask_expanded.sum_keepdim(1)?.broadcast_add(&Tensor::from_slice(&[1e-9f32], (1, 1, 1), &self.device)?)?;
+            let mean_pooled_embeddings = sum_embeddings.broadcast_div(&sum_mask)?;
+            let sentence_embeddings_tensor = mean_pooled_embeddings.squeeze(1)?;
+
+            println!(
+                "[EmbeddingGenerator] Mean pooling complete for batch. Embedding shape: {:?}",
+                sentence_embeddings_tensor.dims()
+            );
+
+            let batch_embeddings_vec = sentence_embeddings_tensor.to_vec2::<f32>()?;
+            all_generated_embeddings.extend(batch_embeddings_vec);
         }
 
-        let mut all_input_ids: Vec<u32> =
-            Vec::with_capacity(batch_size * actual_seq_len_from_tokenizer);
-        let mut all_attention_masks: Vec<u32> =
-            Vec::with_capacity(batch_size * actual_seq_len_from_tokenizer);
-        let mut all_token_type_ids: Vec<u32> =
-            Vec::with_capacity(batch_size * actual_seq_len_from_tokenizer);
-
-        for encoding in &encodings {
-            all_input_ids.extend_from_slice(encoding.get_ids());
-            all_attention_masks.extend_from_slice(encoding.get_attention_mask());
-            all_token_type_ids.extend_from_slice(encoding.get_type_ids());
-        }
-
-        let input_ids = Tensor::from_vec(
-            all_input_ids,
-            (batch_size, actual_seq_len_from_tokenizer),
-            &self.device,
-        )?;
-        let attention_mask_tensor = Tensor::from_vec(
-            all_attention_masks,
-            (batch_size, actual_seq_len_from_tokenizer),
-            &self.device,
-        )?;
-        let token_type_ids = Tensor::from_vec(
-            all_token_type_ids,
-            (batch_size, actual_seq_len_from_tokenizer),
-            &self.device,
-        )?;
-
         println!(
-            "[EmbeddingGenerator] Input tensors created (shape: [{}, {}]). Running model forward pass...",
-            batch_size, actual_seq_len_from_tokenizer
+            "[EmbeddingGenerator] All batches processed. Total embeddings generated: {}",
+            all_generated_embeddings.len()
         );
-
-        let hidden_states =
-            self.model
-                .forward(&input_ids, &token_type_ids, Some(&attention_mask_tensor))?;
-
-        println!("[EmbeddingGenerator] Model forward pass complete. Performing mean pooling...");
-
-        let attention_mask_f32 = attention_mask_tensor.to_dtype(DType::F32)?;
-        let attention_mask_expanded = attention_mask_f32.unsqueeze(D::Minus1)?;
-
-        let masked_embeddings = hidden_states.broadcast_mul(&attention_mask_expanded)?;
-        let sum_embeddings = masked_embeddings.sum_keepdim(1)?;
-
-        let sum_mask = attention_mask_expanded
-            .sum_keepdim(1)?
-            .broadcast_add(&Tensor::from_slice(&[1e-9f32], (1, 1, 1), &self.device)?)?;
-
-        let mean_pooled_embeddings = sum_embeddings.broadcast_div(&sum_mask)?;
-        let sentence_embeddings = mean_pooled_embeddings.squeeze(1)?;
-
-        println!(
-            "[EmbeddingGenerator] Mean pooling complete. Embedding shape: {:?}",
-            sentence_embeddings.dims()
-        );
-
-        sentence_embeddings
-            .to_vec2::<f32>()
-            .map_err(anyhow::Error::from)
+        Ok(all_generated_embeddings)
     }
 }
