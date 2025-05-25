@@ -1,11 +1,15 @@
 use anyhow::{Context, Result};
 use futures::StreamExt;
-use log::{debug, error, info, warn};
+use log::{error, info, warn};
 use qdrant_client::Qdrant;
-use qdrant_client::qdrant::{CreateCollection, Distance, VectorParams, VectorsConfig};
+use qdrant_client::qdrant::{
+    CreateCollection, Distance, PointStruct, UpsertPoints, Value, VectorParams, VectorsConfig,
+};
 use shared_models::TextWithEmbeddingsMessage;
+use std::collections::HashMap;
 use std::time::Duration;
 use std::{env, sync::Arc};
+use uuid::Uuid;
 
 const TEXT_WITH_EMBEDDINGS_SUBJECT: &str = "data.text.with_embeddings";
 const QDRANT_COLLECTION_NAME: &str = "symbiont_document_embeddings";
@@ -118,11 +122,102 @@ async fn handle_text_with_embeddings_message(
         msg.embeddings_data.len(),
         msg.model_name
     );
-    // TODO: Сформировать точки и сохранить в Qdrant
-    debug!(
-        "[QDRANT_HANDLER] Stub: Data for original_id {} would be processed for Qdrant.",
+
+    if msg.embeddings_data.is_empty() {
+        warn!(
+            "[QDRANT_HANDLER] No embeddings data found in message for original_id: {}. Skipping.",
+            msg.original_id
+        );
+        return Ok(());
+    }
+
+    let mut points_to_upsert: Vec<PointStruct> = Vec::with_capacity(msg.embeddings_data.len());
+
+    for (index, sentence_embedding) in msg.embeddings_data.iter().enumerate() {
+        let mut payload: HashMap<String, Value> = HashMap::new();
+        payload.insert(
+            "original_document_id".to_string(),
+            Value::from(msg.original_id.clone()),
+        );
+        payload.insert(
+            "source_url".to_string(),
+            Value::from(msg.source_url.clone()),
+        );
+        payload.insert(
+            "sentence_text".to_string(),
+            Value::from(sentence_embedding.sentence_text.clone()),
+        );
+        payload.insert("sentence_order".to_string(), Value::from(index as i64));
+        payload.insert(
+            "model_name".to_string(),
+            Value::from(msg.model_name.clone()),
+        );
+        payload.insert(
+            "processed_at_ms".to_string(),
+            Value::from(msg.timestamp_ms as i64),
+        );
+
+        let point_id = qdrant_client::qdrant::PointId::from(Uuid::new_v4().to_string());
+
+        let point = PointStruct {
+            id: Some(point_id),
+            payload,
+            vectors: Some(qdrant_client::qdrant::Vectors::from(
+                sentence_embedding.embedding.clone(),
+            )),
+        };
+
+        points_to_upsert.push(point);
+    }
+
+    if points_to_upsert.is_empty() {
+        warn!(
+            "[QDRANT_HANDLER] No points to upsert for original_id: {}. This shouldn't happen if embeddings_data was not empty.",
+            msg.original_id
+        );
+        return Ok(());
+    }
+
+    info!(
+        "[QDRANT_HANDLER] Upserting {} points to Qdrant collection '{}' for original_id: {}...",
+        points_to_upsert.len(),
+        QDRANT_COLLECTION_NAME,
         msg.original_id
     );
+
+    let upsert_request = UpsertPoints {
+        collection_name: QDRANT_COLLECTION_NAME.to_string(),
+        wait: Some(true),
+        points: points_to_upsert,
+        ordering: None,
+        shard_key_selector: None,
+    };
+
+    match qdrant_client.upsert_points(upsert_request).await {
+        Ok(response) => {
+            if response.result.map_or(false, |op_info| {
+                op_info.status == qdrant_client::qdrant::UpdateStatus::Completed as i32
+            }) {
+                info!(
+                    "[QDRANT_HANDLER] Successfully upserted points for original_id: {}. Qdrant op time: {}s",
+                    msg.original_id, response.time
+                );
+            } else {
+                warn!(
+                    "[QDRANT_HANDLER] Qdrant upsert operation for original_id: {} completed but status was not 'Completed'. Response: {:?}",
+                    msg.original_id, response
+                );
+            }
+        }
+        Err(e) => {
+            error!(
+                "[QDRANT_HANDLER_ERROR] Failed to upsert points to Qdrant for original_id {}: {}",
+                msg.original_id, e
+            );
+            return Err(e.into());
+        }
+    }
+
     Ok(())
 }
 
