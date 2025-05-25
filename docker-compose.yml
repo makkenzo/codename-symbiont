@@ -97,6 +97,21 @@ services:
         networks:
             - symbiont-net
 
+    vector_memory_service:
+        container_name: cs-vector-memory-service
+        build:
+            context: .
+            dockerfile: ./services/vector_memory_service/Dockerfile
+        depends_on:
+            - nats
+            - qdrant
+        environment:
+            - NATS_URL=nats://cs-nats:4222
+            - QDRANT_URI=http://cs-qdrant:6334
+            - RUST_LOG=info,vector_memory_service=debug,qdrant_client=info
+        networks:
+            - symbiont-net
+
     api_service:
         container_name: cs-api-service
         build:
